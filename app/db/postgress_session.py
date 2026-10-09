@@ -20,7 +20,10 @@ class PostgresSession:
         self._engine: AsyncEngine = create_async_engine(
             db_settings.POSTGRES_URL,
             echo=db_settings.POSTGRES_ECHO,
-            connect_args={"server_settings": {"timezone": "UTC"}},
+            connect_args={
+                "ssl": db_settings.POSTGRES_SSL,
+                "server_settings": {"timezone": "UTC"},
+            },
         )
         self._sessionmaker: async_sessionmaker[AsyncSession] = async_sessionmaker(
             bind=self._engine,
