@@ -10,6 +10,16 @@ _base_config = SettingsConfigDict(
 )
 
 
+_POSTGRES_SSL_MODES = {
+    "disable",
+    "allow",
+    "prefer",
+    "require",
+    "verify-ca",
+    "verify-full",
+}
+
+
 class DatabaseSettings(BaseSettings):
     POSTGRES_SERVER: str
     POSTGRES_PORT: int
@@ -17,6 +27,7 @@ class DatabaseSettings(BaseSettings):
     POSTGRES_PASSWORD: str
     POSTGRES_DB: str
     POSTGRES_ECHO: bool = False
+    POSTGRES_SSL: str = "require"
 
     GARAGE_ENDPOINT_URL: str
     GARAGE_ACCESS_KEY: str
@@ -26,11 +37,22 @@ class DatabaseSettings(BaseSettings):
 
     model_config = _base_config
 
+    @field_validator("POSTGRES_SSL")
+    @classmethod
+    def validate_postgres_ssl(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in _POSTGRES_SSL_MODES:
+            allowed = ", ".join(sorted(_POSTGRES_SSL_MODES))
+            raise ValueError(f"POSTGRES_SSL must be one of: {allowed}")
+        return mode
+
     @property
     def POSTGRES_URL(self) -> str:
+        # asyncpg takes `ssl`, not libpq's `sslmode`.
         return (
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+            f"?ssl={self.POSTGRES_SSL}"
         )
 
 
