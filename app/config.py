@@ -80,20 +80,52 @@ class CorsSettings(BaseSettings):
 class AuthSettings(BaseSettings):
     JWT_SECRET: str = "dev-only-change-me"
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     INVITE_EXPIRE_DAYS: int = 7
     PASSWORD_RESET_EXPIRE_MINUTES: int = 30
-    PASSWORD_RESET_MAX_ATTEMPTS: int = 5
+    REFRESH_REUSE_GRACE_SECONDS: int = 10
+    COOKIE_SECURE: bool = False
+    COOKIE_SAMESITE: str = "lax"
+    APP_TIMEZONE: str = "Asia/Kolkata"
+    FRONTEND_URL: str = "http://localhost:5173"
+    TRUSTED_PROXY_COUNT: int = 0
+    FORGOT_PASSWORD_MAX_PER_DAY: int = 3
+    FORGOT_PASSWORD_LOCK_HOURS: int = 24
+    RESET_EMAIL_MAX_SENDS: int = 3
+    RESET_EMAIL_BLOCK_HOURS: int = 4
+    PROFILE_PASSWORD_MAX_PER_DAY: int = 3
+    SUPER_ADMIN_EMAIL: str = ""
+    SUPER_ADMIN_PASSWORD: str = ""
+    SUPER_ADMIN_FIRST_NAME: str = "Super"
+    SUPER_ADMIN_LAST_NAME: str = "Admin"
 
     model_config = _base_config
+
+    @field_validator("COOKIE_SAMESITE")
+    @classmethod
+    def validate_samesite(cls, value: str) -> str:
+        mode = value.strip().lower()
+        if mode not in {"lax", "strict", "none"}:
+            raise ValueError("COOKIE_SAMESITE must be lax, strict, or none")
+        return mode
+
+    @field_validator("FRONTEND_URL")
+    @classmethod
+    def strip_frontend_url(cls, value: str) -> str:
+        return value.strip().rstrip("/")
+
+    @field_validator("SUPER_ADMIN_EMAIL")
+    @classmethod
+    def normalize_super_admin_email(cls, value: str) -> str:
+        return value.strip().lower()
 
 
 class EmailSettings(BaseSettings):
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
-    SMTP_EMAIL: str
-    SMTP_PASSWORD: str
+    SMTP_EMAIL: str = ""
+    SMTP_PASSWORD: str = ""
     SMTP_FROM_NAME: str = "ERP"
     SMTP_TIMEOUT_SECONDS: int = 30
 
@@ -101,20 +133,18 @@ class EmailSettings(BaseSettings):
 
     @field_validator("SMTP_EMAIL", "SMTP_FROM_NAME")
     @classmethod
-    def strip_required_text(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("value is required")
-        return text
+    def strip_email_text(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("SMTP_PASSWORD")
     @classmethod
     def normalize_app_password(cls, value: str) -> str:
         # Gmail shows app passwords in groups of four. Spaces are optional.
-        password = "".join(value.split())
-        if not password:
-            raise ValueError("SMTP_PASSWORD is required")
-        return password
+        return "".join(value.split())
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.SMTP_EMAIL and self.SMTP_PASSWORD)
 
 
 class MediaSettings(BaseSettings):

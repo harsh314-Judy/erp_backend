@@ -26,6 +26,9 @@ async def send_email(
     ``receiver`` is one address or a list of addresses. ``content`` is the
     plain-text body. ``html_content`` is an optional HTML alternative.
     """
+    if not email_settings.is_configured:
+        raise EmailSendError("SMTP is not configured")
+
     receivers = _normalize_receivers(receiver)
     body = content.strip()
     html = html_content.strip() if html_content else None
