@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
     await postgres_session.dispose()
 
 
-app = FastAPI(title="Portfolio API", lifespan=lifespan)
+app = FastAPI(title="ERP API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_settings.allowed_origins,
