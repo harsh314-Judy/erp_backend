@@ -89,6 +89,34 @@ class AuthSettings(BaseSettings):
     model_config = _base_config
 
 
+class EmailSettings(BaseSettings):
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_EMAIL: str
+    SMTP_PASSWORD: str
+    SMTP_FROM_NAME: str = "ERP"
+    SMTP_TIMEOUT_SECONDS: int = 30
+
+    model_config = _base_config
+
+    @field_validator("SMTP_EMAIL", "SMTP_FROM_NAME")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("value is required")
+        return text
+
+    @field_validator("SMTP_PASSWORD")
+    @classmethod
+    def normalize_app_password(cls, value: str) -> str:
+        # Gmail shows app passwords in groups of four. Spaces are optional.
+        password = "".join(value.split())
+        if not password:
+            raise ValueError("SMTP_PASSWORD is required")
+        return password
+
+
 class MediaSettings(BaseSettings):
     MEDIA_MAX_IMAGE_BYTES: int = 5_242_880
     MEDIA_MAX_DOCUMENT_BYTES: int = 10_485_760
@@ -114,4 +142,5 @@ class MediaSettings(BaseSettings):
 db_settings = DatabaseSettings()  # type: ignore[call-arg]
 cors_settings = CorsSettings()  # type: ignore[call-arg]
 auth_settings = AuthSettings()  # type: ignore[call-arg]
+email_settings = EmailSettings()  # type: ignore[call-arg]
 media_settings = MediaSettings()  # type: ignore[call-arg]
