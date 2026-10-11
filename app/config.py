@@ -77,6 +77,18 @@ class CorsSettings(BaseSettings):
         ]
 
 
+class AuthSettings(BaseSettings):
+    JWT_SECRET: str = "dev-only-change-me"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    INVITE_EXPIRE_DAYS: int = 7
+    PASSWORD_RESET_EXPIRE_MINUTES: int = 30
+    PASSWORD_RESET_MAX_ATTEMPTS: int = 5
+
+    model_config = _base_config
+
+
 class MediaSettings(BaseSettings):
     MEDIA_MAX_IMAGE_BYTES: int = 5_242_880
     MEDIA_MAX_DOCUMENT_BYTES: int = 10_485_760
@@ -101,4 +113,5 @@ class MediaSettings(BaseSettings):
 
 db_settings = DatabaseSettings()  # type: ignore[call-arg]
 cors_settings = CorsSettings()  # type: ignore[call-arg]
+auth_settings = AuthSettings()  # type: ignore[call-arg]
 media_settings = MediaSettings()  # type: ignore[call-arg]
