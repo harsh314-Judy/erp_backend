@@ -9,7 +9,7 @@ from app.config import auth_settings
 
 logger = logging.getLogger(__name__)
 
-_BOOTSTRAP_ROLES = ("super_admin", "admin")
+_BOOTSTRAP_ROLES = ("super_admin", "admin", "accountant", "staff")
 
 
 async def bootstrap_super_admin(session: AsyncSession) -> None:

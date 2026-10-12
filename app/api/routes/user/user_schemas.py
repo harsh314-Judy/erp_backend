@@ -32,6 +32,13 @@ class UserUpdate(BaseModel):
     email: str | None = Field(default=None, min_length=3, max_length=255)
     password: str | None = Field(default=None, min_length=8, max_length=128)
     role_id: UUID | None = None
+    identity_overridden: bool | None = None
+
+
+class ProfileUpdate(BaseModel):
+    first_name: str = Field(min_length=1, max_length=150)
+    last_name: str | None = Field(default=None, max_length=150)
+    email: str = Field(min_length=3, max_length=255)
 
 
 class UserRead(BaseModel):
@@ -43,6 +50,7 @@ class UserRead(BaseModel):
     email: str
     role_id: UUID
     role_name: str | None = None
+    identity_overridden: bool = False
 
 
 class PasswordChangeRequest(BaseModel):

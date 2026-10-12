@@ -5,6 +5,7 @@ from fastapi import APIRouter, Response, status
 from app.api.dependencies import AdminUserDep, CurrentUserDep, UserServiceDep
 from app.api.routes.user.user_schemas import (
     PasswordChangeRequest,
+    ProfileUpdate,
     RoleCreate,
     RoleRead,
     RoleUpdate,
@@ -53,6 +54,13 @@ async def delete_role(role_id: UUID, service: UserServiceDep, _: AdminUserDep) -
 @router.get("/users/me", response_model=UserRead)
 async def get_me(user: CurrentUserDep, service: UserServiceDep) -> UserRead:
     return await service.get_user(user.id)
+
+
+@router.patch("/users/me", response_model=UserRead)
+async def update_me(
+    data: ProfileUpdate, user: CurrentUserDep, service: UserServiceDep
+) -> UserRead:
+    return await service.update_profile(user, data)
 
 
 @router.post("/users/me/password", response_model=MessageResponse)
