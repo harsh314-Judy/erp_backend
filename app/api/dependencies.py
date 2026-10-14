@@ -15,6 +15,13 @@ from app.api.routes.purchase_order.purchase_order_services import PurchaseOrderS
 from app.api.routes.raw_material.raw_material_services import RawMaterialService
 from app.api.routes.sales.sales_services import SalesService
 from app.api.routes.supplier.supplier_services import SupplierService
+from app.api.routes.attachment.attachment_services import AttachmentService
+from app.api.routes.inventory.inventory_services import InventoryService
+from app.api.routes.invoice.invoice_services import InvoiceService
+from app.api.routes.purchase_order.purchase_order_services import PurchaseFlowService
+from app.api.routes.report.report_services import ReportService
+from app.api.routes.sales.sales_services import SalesOrderService
+from app.api.routes.settings.settings_services import SettingsService
 from app.api.routes.user.user_services import UserService
 
 
@@ -94,6 +101,34 @@ def get_sales_service(pg_session: PGSessionDep) -> SalesService:
     return SalesService(pg_session)
 
 
+def get_sales_order_service(pg_session: PGSessionDep) -> SalesOrderService:
+    return SalesOrderService(pg_session)
+
+
+def get_inventory_service(pg_session: PGSessionDep) -> InventoryService:
+    return InventoryService(pg_session)
+
+
+def get_invoice_service(pg_session: PGSessionDep) -> InvoiceService:
+    return InvoiceService(pg_session)
+
+
+def get_settings_service(pg_session: PGSessionDep) -> SettingsService:
+    return SettingsService(pg_session)
+
+
+def get_report_service(pg_session: PGSessionDep) -> ReportService:
+    return ReportService(pg_session)
+
+
+def get_purchase_flow_service(pg_session: PGSessionDep) -> PurchaseFlowService:
+    return PurchaseFlowService(pg_session)
+
+
+def get_attachment_service(garage_client: GarageClientDep) -> AttachmentService:
+    return AttachmentService(garage_client)
+
+
 type CurrentUserDep = Annotated[User, Depends(get_current_user)]
 type AdminUserDep = Annotated[User, Depends(require_admin)]
 type HealthServiceDep = Annotated[HealthService, Depends(get_health_service)]
@@ -109,3 +144,10 @@ type PurchaseOrderServiceDep = Annotated[
 ]
 type CustomerServiceDep = Annotated[CustomerService, Depends(get_customer_service)]
 type SalesServiceDep = Annotated[SalesService, Depends(get_sales_service)]
+type SalesOrderServiceDep = Annotated[SalesOrderService, Depends(get_sales_order_service)]
+type InventoryServiceDep = Annotated[InventoryService, Depends(get_inventory_service)]
+type InvoiceServiceDep = Annotated[InvoiceService, Depends(get_invoice_service)]
+type SettingsServiceDep = Annotated[SettingsService, Depends(get_settings_service)]
+type ReportServiceDep = Annotated[ReportService, Depends(get_report_service)]
+type PurchaseFlowServiceDep = Annotated[PurchaseFlowService, Depends(get_purchase_flow_service)]
+type AttachmentServiceDep = Annotated[AttachmentService, Depends(get_attachment_service)]

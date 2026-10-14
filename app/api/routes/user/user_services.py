@@ -15,6 +15,7 @@ from app.api.routes.auth.rate_limit import (
     record_attempt,
 )
 from app.api.routes.user.user_model import MANAGED_BY_ADMIN, SYSTEM_ROLES, Role, User
+from app.api.security.permissions import can_manage_role
 from app.api.routes.user.user_schemas import (
     PasswordChangeRequest,
     ProfileUpdate,
@@ -108,6 +109,8 @@ class UserService:
 
     async def update_user(self, user_id: UUID, data: UserUpdate, actor: User) -> UserRead:
         row = await get_or_404(self.session, User, user_id)
+        if row.id != actor.id:
+            await self._guard_can_manage(actor, row.role_id)
         changes = data.model_dump(exclude_unset=True)
         if "role_id" in changes and changes["role_id"] is not None:
             await self._guard_super_admin_assignment(actor, changes["role_id"])
@@ -131,8 +134,9 @@ class UserService:
         await self.session.refresh(row)
         return await self._read(row)
 
-    async def delete_user(self, user_id: UUID) -> None:
+    async def delete_user(self, user_id: UUID, actor: User) -> None:
         row = await get_or_404(self.session, User, user_id)
+        await self._guard_can_manage(actor, row.role_id)
         await self._guard_last_super_admin(row, None)
         await revoke_refresh_tokens(self.session, row.id)
         await self.session.delete(row)
@@ -215,14 +219,15 @@ class UserService:
         return actor_role == "admin" and target_role in MANAGED_BY_ADMIN
 
     async def _guard_super_admin_assignment(self, actor: User, role_id: UUID) -> None:
+        await self._guard_can_manage(actor, role_id)
+
+    async def _guard_can_manage(self, actor: User, role_id: UUID) -> None:
         role = await get_or_404(self.session, Role, role_id)
-        if role.role_name != "super_admin":
-            return
         actor_role = await get_or_404(self.session, Role, actor.role_id)
-        if actor_role.role_name != "super_admin":
+        if not can_manage_role(actor_role.role_name, role.role_name):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only a super admin can assign the super admin role",
+                detail="You cannot manage this role",
             )
 
     async def _guard_last_super_admin(self, user: User, next_role_id: UUID | None) -> None:

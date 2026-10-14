@@ -2,7 +2,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Response, status
 
+from app.api.db_dependency import PGSessionDep
 from app.api.dependencies import AdminUserDep, CurrentUserDep, UserServiceDep
+from app.api.routes.user.user_model import Role, User
+from app.api.security.permissions import EDIT_INVENTORY, MANAGE_SALES, forbid, role_has
+from sqlmodel import select
 from app.api.routes.user.user_schemas import (
     PasswordChangeRequest,
     ProfileUpdate,
@@ -84,6 +88,19 @@ async def list_users(
     return await service.list_users(pagination)
 
 
+@router.get("/users/options")
+async def user_options(session: PGSessionDep, user: CurrentUserDep) -> list[dict]:
+    role = await session.get(Role, user.role_id)
+    name = role.role_name if role else ""
+    if not (role_has(name, MANAGE_SALES) or role_has(name, EDIT_INVENTORY)):
+        forbid()
+    rows = await session.scalars(select(User).order_by(User.first_name))
+    return [
+        {"id": row.id, "first_name": row.first_name, "last_name": row.last_name}
+        for row in rows
+    ]
+
+
 @router.post("/users", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 async def create_user(
     data: UserCreate, service: UserServiceDep, actor: AdminUserDep
@@ -109,5 +126,5 @@ async def update_user(
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_user(user_id: UUID, service: UserServiceDep, _: AdminUserDep) -> None:
-    await service.delete_user(user_id)
+async def delete_user(user_id: UUID, service: UserServiceDep, actor: AdminUserDep) -> None:
+    await service.delete_user(user_id, actor)

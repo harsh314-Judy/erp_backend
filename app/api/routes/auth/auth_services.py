@@ -105,10 +105,12 @@ class AuthService:
     async def create_invite(self, data: InviteCreate, actor: User) -> MessageResponse:
         role = await get_or_404(self.session, Role, data.role_id)
         actor_role = await get_or_404(self.session, Role, actor.role_id)
-        if role.role_name == "super_admin" and actor_role.role_name != "super_admin":
+        from app.api.security.permissions import can_manage_role
+
+        if not can_manage_role(actor_role.role_name, role.role_name):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only a super admin can invite a super admin",
+                detail="You cannot invite this role",
             )
         email = data.email.strip().lower()
         existing = await self.session.scalar(select(User).where(User.email == email))

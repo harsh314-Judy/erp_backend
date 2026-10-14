@@ -8,10 +8,12 @@ class CustomerCreate(BaseModel):
     is_company: bool = False
     gst_number: str | None = Field(default=None, max_length=20)
     address: str = Field(min_length=1)
+    state: str = ""
     phone_number: str = Field(min_length=1, max_length=20)
     alt_phone_number: str | None = Field(default=None, max_length=20)
     email: str = Field(min_length=3, max_length=255)
     whatsapp_number: str | None = Field(default=None, max_length=20)
+    whatsapp_mode: str = "main"
     is_whatsapp_different: bool = False
 
 
@@ -20,10 +22,12 @@ class CustomerUpdate(BaseModel):
     is_company: bool | None = None
     gst_number: str | None = Field(default=None, max_length=20)
     address: str | None = Field(default=None, min_length=1)
+    state: str | None = None
     phone_number: str | None = Field(default=None, min_length=1, max_length=20)
     alt_phone_number: str | None = Field(default=None, max_length=20)
     email: str | None = Field(default=None, min_length=3, max_length=255)
     whatsapp_number: str | None = Field(default=None, max_length=20)
+    whatsapp_mode: str | None = None
     is_whatsapp_different: bool | None = None
 
 
@@ -35,8 +39,10 @@ class CustomerRead(BaseModel):
     is_company: bool
     gst_number: str | None
     address: str
+    state: str = ""
     phone_number: str
     alt_phone_number: str | None
     email: str
     whatsapp_number: str | None
+    whatsapp_mode: str = "main"
     is_whatsapp_different: bool

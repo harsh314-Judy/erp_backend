@@ -2,7 +2,16 @@ from uuid import UUID
 
 from fastapi import APIRouter, status
 
-from app.api.dependencies import PurchaseOrderServiceDep
+from app.api.db_dependency import PGSessionDep
+from app.api.dependencies import CurrentUserDep, PurchaseFlowServiceDep, PurchaseOrderServiceDep
+from app.api.routes.user.user_model import Role
+from app.api.security.permissions import (
+    MANAGE_PURCHASING,
+    VIEW_ASSIGNED_WORK,
+    can_see_prices,
+    forbid,
+    role_has,
+)
 from app.api.routes.purchase_order.purchase_order_schemas import (
     PurchaseOrderProductCreate,
     PurchaseOrderProductRead,
@@ -116,3 +125,71 @@ async def update_product_order(
 )
 async def delete_product_order(order_id: UUID, service: PurchaseOrderServiceDep) -> None:
     await service.delete_product_order(order_id)
+
+
+async def _purchase_role(session: PGSessionDep, user: CurrentUserDep) -> str:
+    role = await session.get(Role, user.role_id)
+    name = role.role_name if role else ""
+    if not (role_has(name, MANAGE_PURCHASING) or role_has(name, VIEW_ASSIGNED_WORK)):
+        forbid()
+    return name
+
+
+@router.get("/purchase-orders")
+async def list_purchase_orders(
+    service: PurchaseFlowServiceDep, session: PGSessionDep, user: CurrentUserDep
+) -> list[dict]:
+    name = await _purchase_role(session, user)
+    staff = name == "staff"
+    return await service.list_orders(show_prices=can_see_prices(name), staff_view=staff)
+
+
+@router.get("/purchase-requests")
+async def list_purchase_requests(
+    service: PurchaseFlowServiceDep, session: PGSessionDep, user: CurrentUserDep
+) -> list[dict]:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.list_requests()
+
+
+@router.post("/purchase-orders", status_code=status.HTTP_201_CREATED)
+async def create_purchase_order(
+    data: dict,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.create_order(data, user)
+
+
+@router.post("/purchase-orders/{order_id}/arrived")
+async def mark_purchase_arrived(
+    order_id: UUID,
+    data: dict,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.mark_arrived(order_id, data)
+
+
+@router.post("/purchase-orders/{order_id}/verify")
+async def verify_purchase_order(
+    order_id: UUID,
+    data: dict,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.verify(order_id, user, data.get("plate_mismatch_note"))

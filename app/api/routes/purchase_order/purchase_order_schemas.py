@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -6,8 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class PurchaseOrderRawMaterialCreate(BaseModel):
     raw_material_id: UUID
     supplier_id: UUID
-    quantity: int = Field(ge=1)
-    per_unit_price: int = Field(ge=0)
+    quantity: Decimal = Field(ge=1)
+    per_unit_price: Decimal = Field(ge=0)
     note: str | None = None
     status: bool = False
 
@@ -15,8 +16,8 @@ class PurchaseOrderRawMaterialCreate(BaseModel):
 class PurchaseOrderRawMaterialUpdate(BaseModel):
     raw_material_id: UUID | None = None
     supplier_id: UUID | None = None
-    quantity: int | None = Field(default=None, ge=1)
-    per_unit_price: int | None = Field(default=None, ge=0)
+    quantity: Decimal | None = Field(default=None, ge=1)
+    per_unit_price: Decimal | None = Field(default=None, ge=0)
     note: str | None = None
     status: bool | None = None
 
@@ -27,8 +28,8 @@ class PurchaseOrderRawMaterialRead(BaseModel):
     id: UUID
     raw_material_id: UUID
     supplier_id: UUID
-    quantity: int
-    per_unit_price: int
+    quantity: Decimal
+    per_unit_price: Decimal
     note: str | None
     status: bool
 
@@ -36,8 +37,8 @@ class PurchaseOrderRawMaterialRead(BaseModel):
 class PurchaseOrderProductCreate(BaseModel):
     supplier_id: UUID
     product_id: UUID
-    quantity: int = Field(ge=1)
-    per_unit_price: int = Field(ge=0)
+    quantity: Decimal = Field(ge=1)
+    per_unit_price: Decimal = Field(ge=0)
     note: str | None = None
     status: bool = False
 
@@ -45,8 +46,8 @@ class PurchaseOrderProductCreate(BaseModel):
 class PurchaseOrderProductUpdate(BaseModel):
     supplier_id: UUID | None = None
     product_id: UUID | None = None
-    quantity: int | None = Field(default=None, ge=1)
-    per_unit_price: int | None = Field(default=None, ge=0)
+    quantity: Decimal | None = Field(default=None, ge=1)
+    per_unit_price: Decimal | None = Field(default=None, ge=0)
     note: str | None = None
     status: bool | None = None
 
@@ -57,7 +58,7 @@ class PurchaseOrderProductRead(BaseModel):
     id: UUID
     supplier_id: UUID
     product_id: UUID
-    quantity: int
-    per_unit_price: int
+    quantity: Decimal
+    per_unit_price: Decimal
     note: str | None
     status: bool

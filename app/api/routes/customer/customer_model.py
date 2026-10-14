@@ -11,6 +11,8 @@ class Customer(Entity, table=True):
     is_company: bool = Field(default=False, nullable=False)
     gst_number: str | None = Field(default=None, max_length=20, nullable=True)
     address: str = Field(sa_type=Text, nullable=False)
+    state: str = Field(default="", max_length=80, nullable=False)
+    whatsapp_mode: str = Field(default="main", max_length=20, nullable=False)
     phone_number: str = Field(max_length=20, nullable=False)
     alt_phone_number: str | None = Field(default=None, max_length=20, nullable=True)
     email: str = Field(max_length=255, nullable=False, index=True)
