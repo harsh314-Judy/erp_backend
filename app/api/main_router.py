@@ -12,6 +12,12 @@ from app.api.routes.purchase_order.purchase_order_router import (
 from app.api.routes.raw_material.raw_material_router import router as raw_material_router
 from app.api.routes.sales.sales_router import router as sales_router
 from app.api.routes.supplier.supplier_router import router as supplier_router
+from app.api.routes.attachment.attachment_router import router as attachment_router
+from app.api.routes.inventory.inventory_router import router as inventory_router
+from app.api.routes.invoice.invoice_router import router as invoice_router
+from app.api.routes.notification.notification_router import router as notification_router
+from app.api.routes.report.report_router import router as report_router
+from app.api.routes.settings.settings_router import router as settings_router
 from app.api.routes.user.user_router import router as user_router
 
 main_router = APIRouter(prefix="/api")
@@ -27,3 +33,9 @@ main_router.include_router(supplier_router)
 main_router.include_router(purchase_order_router)
 main_router.include_router(customer_router)
 main_router.include_router(sales_router)
+main_router.include_router(inventory_router)
+main_router.include_router(invoice_router)
+main_router.include_router(notification_router)
+main_router.include_router(attachment_router)
+main_router.include_router(settings_router)
+main_router.include_router(report_router)

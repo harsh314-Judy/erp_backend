@@ -1,5 +1,6 @@
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.operation.operation_model import Operation, UserOperation
@@ -14,10 +15,20 @@ from app.api.schemas.pagination import PaginatedResponse, PaginationParams
 from app.db.repository import (
     create_model,
     delete_model,
+    get_or_404,
     list_models,
     to_page,
     update_model,
 )
+
+PROTECTED_OPERATIONS = {
+    "cutting",
+    "shaping",
+    "assembly",
+    "polishing",
+    "coloring",
+    "packaging",
+}
 
 
 class OperationService:
@@ -37,10 +48,20 @@ class OperationService:
     async def update_operation(
         self, operation_id: UUID, data: OperationUpdate
     ) -> OperationRead:
+        current = await get_or_404(self.session, Operation, operation_id)
+        incoming = data.name.strip().lower() if data.name else None
+        if current.name.lower() in PROTECTED_OPERATIONS and incoming not in (
+            None,
+            current.name.lower(),
+        ):
+            raise HTTPException(status_code=409, detail="This operation name is part of the plant route")
         row = await update_model(self.session, Operation, operation_id, data)
         return OperationRead.model_validate(row)
 
     async def delete_operation(self, operation_id: UUID) -> None:
+        current = await get_or_404(self.session, Operation, operation_id)
+        if current.name.lower() in PROTECTED_OPERATIONS:
+            raise HTTPException(status_code=409, detail="This operation is part of the plant route")
         await delete_model(self.session, Operation, operation_id)
 
     async def list_assignments(

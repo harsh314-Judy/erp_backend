@@ -1,8 +1,14 @@
 from uuid import UUID
 
+from sqlalchemy import Boolean, false
 from sqlmodel import Field
 
 from app.db.base import Entity
+
+# Fixed roles. Responsibilities for each one are assigned later.
+SYSTEM_ROLES = ("super_admin", "admin", "accountant", "staff")
+# Admin can edit identity for strictly lower roles. Super admin can edit every role.
+MANAGED_BY_ADMIN = frozenset({"accountant", "staff"})
 
 
 class Role(Entity, table=True):
@@ -23,4 +29,11 @@ class User(Entity, table=True):
         nullable=False,
         index=True,
         ondelete="RESTRICT",
+    )
+    # Set when a super admin takes over name or email. Nobody else can change them.
+    identity_overridden: bool = Field(
+        default=False,
+        sa_type=Boolean(),
+        nullable=False,
+        sa_column_kwargs={"server_default": false()},
     )
