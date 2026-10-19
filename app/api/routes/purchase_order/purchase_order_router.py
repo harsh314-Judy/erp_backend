@@ -19,6 +19,7 @@ from app.api.routes.purchase_order.purchase_order_schemas import (
     PurchaseOrderRawMaterialCreate,
     PurchaseOrderRawMaterialRead,
     PurchaseOrderRawMaterialUpdate,
+    PurchaseOrderUpdate,
 )
 from app.api.schemas.pagination import PaginatedResponse, PaginationDep
 
@@ -165,6 +166,20 @@ async def create_purchase_order(
     if not role_has(name, MANAGE_PURCHASING):
         forbid()
     return await service.create_order(data, user)
+
+
+@router.patch("/purchase-orders/{order_id}")
+async def update_purchase_order(
+    order_id: UUID,
+    data: PurchaseOrderUpdate,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.update_order(order_id, data, user)
 
 
 @router.post("/purchase-orders/{order_id}/arrived")

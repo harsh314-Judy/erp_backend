@@ -12,6 +12,9 @@ class SupplierCreate(BaseModel):
     gst_number: str | None = Field(default=None, max_length=20)
     address: str = Field(min_length=1)
     alt_number: str | None = Field(default=None, max_length=20)
+    supply_kind: str = "both"
+    raw_material_ids: list[UUID] = []
+    product_ids: list[UUID] = []
 
 
 class SupplierUpdate(BaseModel):
@@ -23,6 +26,9 @@ class SupplierUpdate(BaseModel):
     gst_number: str | None = Field(default=None, max_length=20)
     address: str | None = Field(default=None, min_length=1)
     alt_number: str | None = Field(default=None, max_length=20)
+    supply_kind: str | None = None
+    raw_material_ids: list[UUID] | None = None
+    product_ids: list[UUID] | None = None
 
 
 class SupplierRead(BaseModel):
@@ -37,6 +43,9 @@ class SupplierRead(BaseModel):
     gst_number: str | None
     address: str
     alt_number: str | None
+    supply_kind: str = "both"
+    raw_material_ids: list[UUID] = []
+    product_ids: list[UUID] = []
 
 
 class RawMaterialSupplierCreate(BaseModel):

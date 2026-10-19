@@ -47,6 +47,33 @@ class InventoryService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Raw material not found")
         return row
 
+    async def held_map(
+        self, *, product_ids: list[UUID] | None = None, raw_material_ids: list[UUID] | None = None
+    ) -> dict[UUID, Decimal]:
+        field = StockReservation.product_id if product_ids is not None else StockReservation.raw_material_id
+        ids = product_ids if product_ids is not None else raw_material_ids or []
+        if not ids:
+            return {}
+        result = await self.session.execute(
+            select(field, func.coalesce(func.sum(StockReservation.quantity), 0))
+            .where(StockReservation.status == "held", field.in_(ids))  # type: ignore[union-attr]
+            .group_by(field)
+        )
+        return {item_id: qty(total) for item_id, total in result.all() if item_id is not None}
+
+    async def making_counts(self, product_ids: list[UUID]) -> dict[UUID, int]:
+        if not product_ids:
+            return {}
+        result = await self.session.execute(
+            select(ProductionJob.product_id, func.count())
+            .where(
+                ProductionJob.product_id.in_(product_ids),  # type: ignore[attr-defined]
+                ProductionJob.status.in_(["pending", "in_progress", "awaiting_approval"]),  # type: ignore[attr-defined]
+            )
+            .group_by(ProductionJob.product_id)
+        )
+        return {product_id: int(count) for product_id, count in result.all()}
+
     async def held(
         self, *, product_id: UUID | None = None, raw_material_id: UUID | None = None
     ) -> Decimal:

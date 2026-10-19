@@ -5,6 +5,8 @@ from fastapi import APIRouter, status
 from app.api.db_dependency import PGSessionDep
 from app.api.dependencies import CurrentUserDep, RawMaterialServiceDep
 from app.api.routes.raw_material.raw_material_schemas import (
+    RawMaterialCategoryCreate,
+    RawMaterialCategoryRead,
     RawMaterialCreate,
     RawMaterialOption,
     RawMaterialRead,
@@ -15,6 +17,29 @@ from app.api.schemas.pagination import PaginatedResponse, PaginationDep
 from app.api.security.permissions import EDIT_INVENTORY, VIEW_INVENTORY, can_see_prices, forbid, role_has
 
 router = APIRouter(prefix="/raw-materials", tags=["raw materials"])
+
+
+@router.get("/categories", response_model=PaginatedResponse[RawMaterialCategoryRead])
+async def list_categories(
+    service: RawMaterialServiceDep, pagination: PaginationDep
+) -> PaginatedResponse[RawMaterialCategoryRead]:
+    return await service.list_categories(pagination)
+
+
+@router.post(
+    "/categories",
+    response_model=RawMaterialCategoryRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_category(
+    data: RawMaterialCategoryCreate, service: RawMaterialServiceDep
+) -> RawMaterialCategoryRead:
+    return await service.create_category(data)
+
+
+@router.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_category(category_id: UUID, service: RawMaterialServiceDep) -> None:
+    await service.delete_category(category_id)
 
 
 async def _role(session: PGSessionDep, user: CurrentUserDep, capability: str) -> str:
@@ -43,9 +68,12 @@ async def list_materials(
     session: PGSessionDep,
     user: CurrentUserDep,
     q: str | None = None,
+    brief: bool = False,
 ) -> PaginatedResponse[RawMaterialRead]:
     role_name = await _role(session, user, VIEW_INVENTORY)
-    return await service.list_materials(pagination, query=q, show_prices=can_see_prices(role_name))
+    return await service.list_materials(
+        pagination, query=q, show_prices=can_see_prices(role_name), brief=brief
+    )
 
 
 @router.post("/", response_model=RawMaterialRead, status_code=status.HTTP_201_CREATED, response_model_exclude_none=True)

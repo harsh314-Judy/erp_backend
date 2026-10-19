@@ -17,6 +17,7 @@ class Supplier(Entity, table=True):
     gst_number: str | None = Field(default=None, max_length=20, nullable=True)
     address: str = Field(sa_type=Text, nullable=False)
     alt_number: str | None = Field(default=None, max_length=20, nullable=True)
+    supply_kind: str = Field(default="both", max_length=16, nullable=False)
 
 
 class RawMaterialSupplier(Entity, table=True):

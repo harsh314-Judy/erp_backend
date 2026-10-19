@@ -52,6 +52,21 @@ class PurchaseOrderProductUpdate(BaseModel):
     status: bool | None = None
 
 
+class PurchaseOrderLineWrite(BaseModel):
+    product_id: UUID | None = None
+    raw_material_id: UUID | None = None
+    quantity: Decimal = Field(gt=0)
+    unit_price: Decimal = Field(ge=0)
+
+
+class PurchaseOrderUpdate(BaseModel):
+    status: str | None = None
+    notes: str | None = None
+    expected_vehicle_plate: str | None = None
+    supplier_id: UUID | None = None
+    lines: list[PurchaseOrderLineWrite] | None = None
+
+
 class PurchaseOrderProductRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

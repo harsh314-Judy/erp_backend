@@ -11,7 +11,7 @@ class PaginationParams(BaseModel):
 
     page: int = Field(default=1, ge=1, description="Page number (1-indexed)")
     page_size: int = Field(
-        default=10, ge=1, le=100, description="Number of items per page"
+        default=10, ge=1, le=500, description="Number of items per page"
     )
 
     @property
@@ -51,7 +51,7 @@ class PaginatedResponse(BaseModel, Generic[T]):
 def get_pagination_params(
     page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(
-        default=10, ge=1, le=100, description="Number of items per page"
+        default=10, ge=1, le=500, description="Number of items per page"
     ),
 ) -> PaginationParams:
     return PaginationParams(page=page, page_size=page_size)

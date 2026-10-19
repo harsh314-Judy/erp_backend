@@ -64,6 +64,7 @@ class PurchaseOrder(Entity, table=True):
     created_by_user_id: UUID | None = Field(
         default=None, foreign_key="users.id", nullable=True, ondelete="SET NULL"
     )
+    stock_received: bool = Field(default=False, nullable=False)
 
 
 class PurchaseOrderLine(Entity, table=True):

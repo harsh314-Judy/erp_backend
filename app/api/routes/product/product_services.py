@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -82,10 +83,19 @@ class ProductService:
         return ProductCategoryRead.model_validate(row)
 
     async def delete_category(self, category_id: UUID) -> None:
+        await get_or_404(self.session, ProductCategory, category_id)
+        used = await self.session.scalar(
+            select(func.count()).select_from(Product).where(Product.category_id == category_id)
+        )
+        if used:
+            raise HTTPException(
+                status_code=409,
+                detail="Remove this category from products before deleting it",
+            )
         await delete_model(self.session, ProductCategory, category_id)
 
     async def list_products(
-        self, pagination: PaginationParams, *, query: str | None, show_prices: bool
+        self, pagination: PaginationParams, *, query: str | None, show_prices: bool, brief: bool = False
     ) -> PaginatedResponse[ProductRead]:
         statement = select(Product)
         count = select(func.count()).select_from(Product)
@@ -96,13 +106,27 @@ class ProductService:
             )
             count = count.where(or_(Product.product_name.ilike(like), Product.sku_number.ilike(like)))
         total = int(await self.session.scalar(count) or 0)
-        result = await self.session.scalars(
-            statement.order_by(Product.product_name)
-            .offset(pagination.offset)
-            .limit(pagination.page_size)
+        rows = list(
+            await self.session.scalars(
+                statement.order_by(Product.product_name)
+                .offset(pagination.offset)
+                .limit(pagination.page_size)
+            )
         )
-        items = [await self._present(row, show_prices) for row in result]
-        return to_page(items, total, pagination)
+        if brief:
+            return to_page([self._priced(ProductRead.model_validate(row), show_prices) for row in rows], total, pagination)
+        inventory = InventoryService(self.session)
+        ids = [row.id for row in rows]
+        held = await inventory.held_map(product_ids=ids)
+        making = await inventory.making_counts(ids)
+        return to_page(
+            [
+                self._present_cached(row, held.get(row.id, Decimal("0")), bool(making.get(row.id)), show_prices)
+                for row in rows
+            ],
+            total,
+            pagination,
+        )
 
     async def options(self, query: str | None) -> list[ProductOption]:
         statement = select(Product).order_by(Product.product_name).limit(30)
@@ -201,6 +225,22 @@ class ProductService:
             "available": snapshot["available"],
             "stock_status": snapshot["status"],
         })
+        return self._priced(data, show_prices)
+
+    def _present_cached(self, row: Product, held: Decimal, making: bool, show_prices: bool) -> ProductRead:
+        from app.api.routes.inventory.inventory_services import _status, qty
+
+        snapshot = _status(qty(row.quantity), held, qty(row.alert_quantity), making)
+        data = ProductRead.model_validate(row).model_copy(update={
+            "on_hand": snapshot["on_hand"],
+            "held": snapshot["held"],
+            "available": snapshot["available"],
+            "stock_status": snapshot["status"],
+        })
+        return self._priced(data, show_prices)
+
+    @staticmethod
+    def _priced(data: ProductRead, show_prices: bool) -> ProductRead:
         if not show_prices:
             data.sale_price_without_gst = None
         return data

@@ -132,10 +132,11 @@ async def list_products(
     session: PGSessionDep,
     user: CurrentUserDep,
     q: str | None = None,
+    brief: bool = False,
 ) -> PaginatedResponse[ProductRead]:
     role_name = await _viewer(session, user)
     return await service.list_products(
-        pagination, query=q, show_prices=can_see_prices(role_name)
+        pagination, query=q, show_prices=can_see_prices(role_name), brief=brief
     )
 
 

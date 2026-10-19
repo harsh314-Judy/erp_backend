@@ -7,6 +7,12 @@ from sqlmodel import Field
 from app.db.base import Entity
 
 
+class RawMaterialCategory(Entity, table=True):
+    __tablename__ = "raw_material_categories"
+
+    name: str = Field(max_length=150, unique=True, nullable=False, index=True)
+
+
 class RawMaterial(Entity, table=True):
     __tablename__ = "raw_materials"
 
@@ -26,6 +32,20 @@ class RawMaterial(Entity, table=True):
     responsible_user_id: UUID | None = Field(
         default=None,
         foreign_key="users.id",
+        nullable=True,
+        index=True,
+        ondelete="SET NULL",
+    )
+    category_id: UUID | None = Field(
+        default=None,
+        foreign_key="raw_material_categories.id",
+        nullable=True,
+        index=True,
+        ondelete="RESTRICT",
+    )
+    supplier_id: UUID | None = Field(
+        default=None,
+        foreign_key="suppliers.id",
         nullable=True,
         index=True,
         ondelete="SET NULL",
