@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import func, select
 
+from app.api.routes.activity.activity_services import person_name, write_activity
 from app.api.routes.auth.auth_services import (
     hash_password,
     revoke_refresh_tokens,
@@ -130,6 +131,7 @@ class UserService:
         for key, value in changes.items():
             setattr(row, key, value)
         self.session.add(row)
+        await self._log_profile_change(actor, row, changes)
         await commit_or_conflict(self.session)
         await self.session.refresh(row)
         return await self._read(row)
@@ -139,6 +141,7 @@ class UserService:
         await self._guard_can_manage(actor, row.role_id)
         await self._guard_last_super_admin(row, None)
         await revoke_refresh_tokens(self.session, row.id)
+        await write_activity(self.session, actor, "remove", f"Removed {person_name(row)}"[:160])
         await self.session.delete(row)
         await commit_or_conflict(self.session)
 
@@ -168,8 +171,21 @@ class UserService:
             daily=True,
         )
         self.session.add(user)
+        await write_activity(self.session, user, "password", "Changed their password")
         await commit_or_conflict(self.session)
         return MessageResponse(message="Password updated")
+
+    async def _log_profile_change(self, actor: User, row: User, changes: dict) -> None:
+        identity = any(field in changes for field in (*_IDENTITY_FIELDS, "role_id"))
+        if not identity and "password" not in changes:
+            return
+        if identity and row.id == actor.id:
+            summary = "Updated their own profile"
+        elif identity:
+            summary = f"Updated profile for {person_name(row)}"
+        else:
+            summary = "Changed a password"
+        await write_activity(self.session, actor, "profile", summary[:160])
 
     async def _read(self, user: User) -> UserRead:
         role = await self.session.get(Role, user.role_id)
