@@ -18,6 +18,9 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=1, max_length=128)
+    device_model: str | None = Field(default=None, max_length=80)
+    device_platform: str | None = Field(default=None, max_length=48)
+    device_mobile: bool | None = None
 
 
 class ForgotPasswordRequest(BaseModel):

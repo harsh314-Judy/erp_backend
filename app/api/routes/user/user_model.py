@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from sqlalchemy import Boolean, false
+from sqlalchemy import Boolean, Integer, false
 from sqlmodel import Field
 
 from app.db.base import Entity
@@ -36,4 +36,10 @@ class User(Entity, table=True):
         sa_type=Boolean(),
         nullable=False,
         sa_column_kwargs={"server_default": false()},
+    )
+    # Daily break the plant allows this person to start themselves. Empty means none.
+    daily_break_minutes: int | None = Field(
+        default=None,
+        sa_type=Integer(),
+        nullable=True,
     )
