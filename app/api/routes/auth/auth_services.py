@@ -29,8 +29,7 @@ from app.api.routes.auth.rate_limit import (
     ensure_allowed,
     record_attempt,
 )
-from app.api.routes.activity.activity_services import pause_running_break, write_activity
-from app.api.routes.activity.device import DeviceHint
+from app.api.routes.attendance.attendance_services import close_attendance, open_attendance
 from app.api.routes.user.user_model import Role, User
 from app.api.routes.user.user_schemas import UserRead
 from app.api.schemas.common import MessageResponse
@@ -157,16 +156,10 @@ class AuthService:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Invite was not sent because email is unavailable",
             ) from exc
-        await write_activity(
-            self.session,
-            actor,
-            "invite",
-            f"Invited {email} as {role.role_name.replace('_', ' ')}",
-        )
         await commit_or_conflict(self.session)
         return MessageResponse(message="Invite sent")
 
-    async def signup(self, data: SignupRequest, client_ip: str, hint: DeviceHint | None = None) -> IssuedSession:
+    async def signup(self, data: SignupRequest, client_ip: str) -> IssuedSession:
         invite = await self._active_invite(data.token)
         existing = await self.session.scalar(select(User).where(User.email == invite.email))
         if existing is not None:
@@ -185,23 +178,12 @@ class AuthService:
         self.session.add(user)
         self.session.add(invite)
         await self.session.flush()
-        return await self._issue_session(user, client_ip, hint)
+        return await self._issue_session(user, client_ip)
 
-    async def login(self, data: LoginRequest, client_ip: str, hint: DeviceHint | None = None) -> IssuedSession:
+    async def login(self, data: LoginRequest, client_ip: str) -> IssuedSession:
         email = data.email.strip().lower()
         user = await self.session.scalar(select(User).where(User.email == email))
         if user is None or not verify_password(data.password, user.password):
-            if user is not None:
-                await write_activity(
-                    self.session,
-                    user,
-                    "failed_login",
-                    "Failed sign-in",
-                    hint,
-                    client_ip,
-                    update_presence=False,
-                )
-                await commit_or_conflict(self.session)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect email or password",
@@ -213,7 +195,7 @@ class AuthService:
             daily=True,
             message="This account is locked after too many password resets",
         )
-        return await self._issue_session(user, client_ip, hint)
+        return await self._issue_session(user, client_ip)
 
     async def refresh(self, raw_token: str, client_ip: str) -> IssuedSession:
         presented_hash = hash_token(raw_token)
@@ -265,7 +247,7 @@ class AuthService:
             user=await _user_read(self.session, user),
         )
 
-    async def logout(self, raw_token: str | None, hint: DeviceHint | None = None, client_ip: str | None = None) -> None:
+    async def logout(self, raw_token: str | None) -> None:
         if not raw_token:
             return
         row = await self.session.scalar(
@@ -275,7 +257,7 @@ class AuthService:
             return
         user = await self.session.get(User, row.user_id)
         if user is not None:
-            await write_activity(self.session, user, "logout", "Signed out", hint, client_ip)
+            await close_attendance(self.session, user)
         await self.session.delete(row)
         await commit_or_conflict(self.session)
 
@@ -411,7 +393,7 @@ class AuthService:
         )
         await commit_or_conflict(self.session)
 
-    async def _issue_session(self, user: User, client_ip: str, hint: DeviceHint | None = None) -> IssuedSession:
+    async def _issue_session(self, user: User, client_ip: str) -> IssuedSession:
         raw = new_secret()
         self.session.add(
             RefreshToken(
@@ -422,8 +404,7 @@ class AuthService:
                 + timedelta(days=auth_settings.REFRESH_TOKEN_EXPIRE_DAYS),
             )
         )
-        await pause_running_break(self.session, user)
-        await write_activity(self.session, user, "login", "Signed in", hint, client_ip, touch_login=True)
+        await open_attendance(self.session, user)
         await commit_or_conflict(self.session)
         return IssuedSession(
             access_token=_access_token(user.id),

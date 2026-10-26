@@ -28,6 +28,16 @@ class ProductionJob(Entity, table=True):
     raw_material_used: dict = Field(default_factory=dict, sa_type=JSONB, nullable=False)
     operation_flow: dict = Field(default_factory=dict, sa_type=JSONB, nullable=False)
     product_used: dict = Field(default_factory=dict, sa_type=JSONB, nullable=False)
+    raw_material_used_after_production: dict = Field(
+        default_factory=dict,
+        sa_type=JSONB,
+        nullable=False,
+    )
+    product_used_after_production: dict = Field(
+        default_factory=dict,
+        sa_type=JSONB,
+        nullable=False,
+    )
     quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
     status: str = Field(default="pending", max_length=32, nullable=False, index=True)
     estimated_minutes: int = Field(default=0, nullable=False)
@@ -101,13 +111,3 @@ class ProductionJobInput(Entity, table=True):
     actual_quantity: Decimal | None = Field(default=None, sa_type=Numeric(14, 3), nullable=True)
     wastage_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
     reservation_id: UUID | None = Field(default=None, nullable=True)
-    raw_material_used_after_production: dict = Field(
-        default_factory=dict,
-        sa_type=JSONB,
-        nullable=False,
-    )
-    product_used_after_production: dict = Field(
-        default_factory=dict,
-        sa_type=JSONB,
-        nullable=False,
-    )

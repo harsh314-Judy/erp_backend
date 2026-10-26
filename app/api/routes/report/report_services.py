@@ -11,7 +11,12 @@ from app.api.routes.product.product_model import Product
 from app.api.routes.production.production_model import ProductionJob, ProductionJobStage
 from app.api.routes.purchase_order.purchase_order_model import PurchaseOrder
 from app.api.routes.raw_material.raw_material_model import RawMaterial
-from app.api.routes.report.report_schemas import DashboardRead, ProductionReport, SalesReport
+from app.api.routes.report.report_schemas import (
+    DashboardRead,
+    LowStockItem,
+    ProductionReport,
+    SalesReport,
+)
 from app.api.routes.sales.sales_model import SalesOrder
 from app.api.routes.user.user_model import Role, User
 from app.api.security.permissions import VIEW_FINANCIALS, role_has
@@ -67,13 +72,30 @@ class ReportService:
     async def dashboard(self, actor: User) -> DashboardRead:
         role = await self.session.get(Role, actor.role_id)
         role_name = role.role_name if role else "staff"
-        low = 0
-        for product in await self.session.scalars(select(Product)):
+        shortages: list[LowStockItem] = []
+        for product in await self.session.scalars(select(Product).order_by(Product.product_name)):
             if product.quantity < product.alert_quantity:
-                low += 1
-        for material in await self.session.scalars(select(RawMaterial)):
+                shortages.append(
+                    LowStockItem(
+                        kind="product",
+                        id=product.id,
+                        name=product.product_name,
+                        on_hand=product.quantity,
+                        minimum=product.alert_quantity,
+                        product_type=product.product_type,
+                    )
+                )
+        for material in await self.session.scalars(select(RawMaterial).order_by(RawMaterial.name)):
             if material.quantity < material.alert_quantity:
-                low += 1
+                shortages.append(
+                    LowStockItem(
+                        kind="raw_material",
+                        id=material.id,
+                        name=material.name,
+                        on_hand=material.quantity,
+                        minimum=material.alert_quantity,
+                    )
+                )
         approvals = int(
             await self.session.scalar(
                 select(func.count()).select_from(ProductionJob).where(ProductionJob.status == "awaiting_approval")
@@ -108,7 +130,8 @@ class ReportService:
             role_name=role_name,
             sales=sales,
             production=production,
-            low_stock=low,
+            low_stock=len(shortages),
+            low_stock_items=shortages,
             approvals=approvals,
             unpaid_invoices=unpaid,
             my_jobs=my_jobs,
