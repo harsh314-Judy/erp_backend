@@ -1,4 +1,5 @@
 from decimal import Decimal
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -18,11 +19,21 @@ class ProductionReport(BaseModel):
     pending_jobs: int
 
 
+class LowStockItem(BaseModel):
+    kind: str
+    id: UUID
+    name: str
+    on_hand: Decimal
+    minimum: Decimal
+    product_type: str | None = None
+
+
 class DashboardRead(BaseModel):
     role_name: str
     sales: SalesReport | None = None
     production: ProductionReport | None = None
     low_stock: int = 0
+    low_stock_items: list[LowStockItem] = []
     approvals: int = 0
     unpaid_invoices: int = 0
     my_jobs: int = 0

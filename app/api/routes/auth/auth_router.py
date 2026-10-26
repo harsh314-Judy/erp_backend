@@ -10,22 +10,10 @@ from app.api.routes.auth.auth_schemas import (
 )
 from app.api.routes.user.user_schemas import UserRead
 from app.api.schemas.common import MessageResponse
-from app.api.routes.activity.activity_router import hint_from
-from app.api.routes.activity.device import DeviceHint
 from app.api.security.client_ip import client_ip
 from app.api.security.cookies import REFRESH_COOKIE, clear_auth_cookies, set_auth_cookies
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-
-def _login_hint(request: Request, data: LoginRequest) -> DeviceHint:
-    header = hint_from(request)
-    return DeviceHint(
-        user_agent=header.user_agent,
-        model=data.device_model or header.model,
-        platform=data.device_platform or header.platform,
-        mobile=data.device_mobile if data.device_mobile is not None else header.mobile,
-    )
 
 
 def _apply_session(response: Response, issued) -> None:
@@ -53,7 +41,7 @@ async def signup(
     response: Response,
     service: AuthServiceDep,
 ) -> UserRead:
-    issued = await service.signup(data, client_ip(request), hint_from(request))
+    issued = await service.signup(data, client_ip(request))
     _apply_session(response, issued)
     return issued.user
 
@@ -65,7 +53,7 @@ async def login(
     response: Response,
     service: AuthServiceDep,
 ) -> UserRead:
-    issued = await service.login(data, client_ip(request), _login_hint(request, data))
+    issued = await service.login(data, client_ip(request))
     _apply_session(response, issued)
     return issued.user
 
@@ -94,7 +82,7 @@ async def refresh(
 async def logout(
     request: Request, response: Response, service: AuthServiceDep
 ) -> MessageResponse:
-    await service.logout(request.cookies.get(REFRESH_COOKIE), hint_from(request), client_ip(request))
+    await service.logout(request.cookies.get(REFRESH_COOKIE))
     clear_auth_cookies(response)
     return MessageResponse(message="ok")
 
