@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.routes.activity.activity_router import router as activity_router
 from app.api.routes.auth.auth_router import router as auth_router
 from app.api.routes.customer.customer_router import router as customer_router
 from app.api.routes.health import health_routes
@@ -24,6 +25,7 @@ main_router = APIRouter(prefix="/api")
 
 main_router.include_router(health_routes.router)
 main_router.include_router(auth_router)
+main_router.include_router(activity_router)
 main_router.include_router(user_router)
 main_router.include_router(product_router)
 main_router.include_router(raw_material_router)
