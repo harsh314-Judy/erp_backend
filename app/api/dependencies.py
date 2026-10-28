@@ -1,4 +1,5 @@
 from typing import Annotated
+from time import monotonic
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
@@ -32,13 +33,22 @@ async def get_current_user(request: Request, session: PGSessionDep) -> User:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Access token is missing or expired",
         )
+    cached = _user_cache.get(user_id)
+    now = monotonic()
+    if cached is not None and now - cached[0] < 20:
+        return User.model_validate(cached[1])
     user = await session.get(User, user_id)
     if user is None:
+        _user_cache.pop(user_id, None)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Access token is missing or expired",
         )
+    _user_cache[user_id] = (now, user.model_dump())
     return user
+
+
+_user_cache: dict[UUID, tuple[float, dict]] = {}
 
 
 async def require_admin(

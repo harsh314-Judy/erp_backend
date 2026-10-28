@@ -97,31 +97,61 @@ class ProductService:
     async def list_products(
         self, pagination: PaginationParams, *, query: str | None, show_prices: bool, brief: bool = False
     ) -> PaginatedResponse[ProductRead]:
-        statement = select(Product)
-        count = select(func.count()).select_from(Product)
-        if query:
+        from app.api.routes.inventory.inventory_model import StockReservation
+        from app.api.routes.production.production_model import ProductionJob
+
+        filters = []
+        if query and query.strip():
             like = f"%{query.strip()}%"
-            statement = statement.where(
-                or_(Product.product_name.ilike(like), Product.sku_number.ilike(like))
+            filters.append(or_(Product.product_name.ilike(like), Product.sku_number.ilike(like)))
+        total_col = func.count().over().label("total")
+        if brief:
+            statement = select(Product, total_col)
+        else:
+            held = (
+                select(func.coalesce(func.sum(StockReservation.quantity), 0))
+                .where(StockReservation.status == "held", StockReservation.product_id == Product.id)
+                .correlate(Product)
+                .scalar_subquery()
             )
-            count = count.where(or_(Product.product_name.ilike(like), Product.sku_number.ilike(like)))
-        total = int(await self.session.scalar(count) or 0)
-        rows = list(
-            await self.session.scalars(
+            making = (
+                select(func.count())
+                .select_from(ProductionJob)
+                .where(
+                    ProductionJob.product_id == Product.id,  # type: ignore[attr-defined]
+                    ProductionJob.status.in_(["pending", "in_progress", "awaiting_approval"]),  # type: ignore[attr-defined]
+                )
+                .correlate(Product)
+                .scalar_subquery()
+            )
+            statement = select(Product, held.label("held"), making.label("making"), total_col)
+        if filters:
+            statement = statement.where(*filters)
+        rows = (
+            await self.session.execute(
                 statement.order_by(Product.product_name)
                 .offset(pagination.offset)
                 .limit(pagination.page_size)
             )
-        )
+        ).all()
+        if rows:
+            total = int(rows[0].total)
+        elif pagination.offset:
+            count = select(func.count()).select_from(Product)
+            if filters:
+                count = count.where(*filters)
+            total = int(await self.session.scalar(count) or 0)
+        else:
+            total = 0
         if brief:
-            return to_page([self._priced(ProductRead.model_validate(row), show_prices) for row in rows], total, pagination)
-        inventory = InventoryService(self.session)
-        ids = [row.id for row in rows]
-        held = await inventory.held_map(product_ids=ids)
-        making = await inventory.making_counts(ids)
+            return to_page(
+                [self._priced(ProductRead.model_validate(row[0]), show_prices) for row in rows],
+                total,
+                pagination,
+            )
         return to_page(
             [
-                self._present_cached(row, held.get(row.id, Decimal("0")), bool(making.get(row.id)), show_prices)
+                self._present_cached(row[0], Decimal(row.held or 0), bool(row.making), show_prices)
                 for row in rows
             ],
             total,

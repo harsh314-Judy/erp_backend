@@ -1,9 +1,10 @@
 from uuid import UUID
 
 from fastapi import APIRouter, status
+from fastapi.responses import Response
 
 from app.api.db_dependency import PGSessionDep
-from app.api.dependencies import CurrentUserDep, InvoiceServiceDep
+from app.api.dependencies import AttachmentServiceDep, CurrentUserDep, InvoiceServiceDep
 from app.api.routes.invoice.invoice_schemas import InvoiceRead, PaymentCreate
 from app.api.routes.user.user_model import Role
 from app.api.security.permissions import MANAGE_SALES, forbid, role_has
@@ -34,6 +35,23 @@ async def get_invoice(
 ) -> InvoiceRead:
     await _sales(session, user)
     return await service.get_invoice(invoice_id)
+
+
+@router.get("/{invoice_id}/pdf")
+async def download_invoice_pdf(
+    invoice_id: UUID,
+    service: InvoiceServiceDep,
+    attachments: AttachmentServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> Response:
+    await _sales(session, user)
+    payload, filename = await service.pdf_file(invoice_id, attachments)
+    return Response(
+        content=payload,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{invoice_id}/payments", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)

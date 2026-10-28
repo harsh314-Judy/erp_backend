@@ -75,6 +75,7 @@ class SalesOrderRead(BaseModel):
     delivery_charge: Decimal
     lines: list[SalesOrderLineRead]
     invoice_id: UUID | None = None
+    invoice_has_pdf: bool = False
 
 
 class PackagingAssign(BaseModel):

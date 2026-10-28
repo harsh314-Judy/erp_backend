@@ -12,19 +12,33 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import db_settings
 
+_engine: AsyncEngine | None = None
+
+
+def async_engine() -> AsyncEngine:
+    if _engine is None:
+        raise RuntimeError("Database engine is not ready")
+    return _engine
+
 
 class PostgresSession:
     """Manages the PostgreSQL database connection and sessions."""
 
     def __init__(self) -> None:
+        global _engine
         self._engine: AsyncEngine = create_async_engine(
             db_settings.POSTGRES_URL,
             echo=db_settings.POSTGRES_ECHO,
+            pool_size=10,
+            max_overflow=5,
+            pool_timeout=30,
+            pool_recycle=280,
             connect_args={
                 "ssl": db_settings.POSTGRES_SSL,
                 "server_settings": {"timezone": "UTC"},
             },
         )
+        _engine = self._engine
         self._sessionmaker: async_sessionmaker[AsyncSession] = async_sessionmaker(
             bind=self._engine,
             expire_on_commit=False,

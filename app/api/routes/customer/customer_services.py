@@ -52,4 +52,25 @@ class CustomerService:
         return CustomerRead.model_validate(row)
 
     async def delete_customer(self, customer_id: UUID) -> None:
+        from fastapi import HTTPException
+        from sqlmodel import select
+
+        from app.api.routes.invoice.invoice_model import Invoice
+        from app.api.routes.sales.sales_model import Sale, SalesOrder
+
+        await get_or_404(self.session, Customer, customer_id)
+        linked = await self.session.scalar(
+            select(SalesOrder.id).where(SalesOrder.customer_id == customer_id)
+        )
+        if linked is None:
+            linked = await self.session.scalar(select(Sale.id).where(Sale.customer_id == customer_id))
+        if linked is None:
+            linked = await self.session.scalar(
+                select(Invoice.id).where(Invoice.customer_id == customer_id)
+            )
+        if linked is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="This client has sales records and cannot be deleted",
+            )
         await delete_model(self.session, Customer, customer_id)

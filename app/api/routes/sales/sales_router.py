@@ -3,7 +3,14 @@ from uuid import UUID
 from fastapi import APIRouter, status
 
 from app.api.db_dependency import PGSessionDep
-from app.api.dependencies import CurrentUserDep, SalesOrderServiceDep, SalesServiceDep
+from app.api.dependencies import (
+    AttachmentServiceDep,
+    CurrentUserDep,
+    InvoiceServiceDep,
+    SalesOrderServiceDep,
+    SalesServiceDep,
+)
+from app.api.routes.invoice.invoice_schemas import InvoiceDraft, InvoiceIssue, InvoiceRead
 from app.api.routes.sales.sales_schemas import (
     PackagingAssign,
     SaleCreate,
@@ -37,6 +44,14 @@ async def list_orders(
 ) -> list[SalesOrderRead]:
     name = await _sales_role(session, user)
     return await service.list_orders(show_prices=can_see_prices(name))
+
+
+@router.delete("/orders/dispatched")
+async def delete_dispatched_orders(
+    service: SalesOrderServiceDep, session: PGSessionDep, user: CurrentUserDep
+) -> dict[str, int]:
+    await _sales_role(session, user)
+    return {"deleted": await service.delete_dispatched()}
 
 
 @router.post("/orders", response_model=SalesOrderRead, status_code=status.HTTP_201_CREATED)
@@ -84,6 +99,30 @@ async def dispatch_order(
 ) -> SalesOrderRead:
     name = await _sales_role(session, user)
     return await service.dispatch(order_id, user, show_prices=can_see_prices(name))
+
+
+@router.get("/orders/{order_id}/invoice-draft", response_model=InvoiceDraft)
+async def invoice_draft(
+    order_id: UUID,
+    service: InvoiceServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> InvoiceDraft:
+    await _sales_role(session, user)
+    return await service.draft_for_order(order_id)
+
+
+@router.post("/orders/{order_id}/invoice", response_model=InvoiceRead, status_code=status.HTTP_201_CREATED)
+async def issue_invoice(
+    order_id: UUID,
+    data: InvoiceIssue,
+    service: InvoiceServiceDep,
+    attachments: AttachmentServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> InvoiceRead:
+    await _sales_role(session, user)
+    return await service.issue_for_order(order_id, data, user, attachments)
 
 
 @router.get("/{sale_id}", response_model=SaleRead)

@@ -38,17 +38,36 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_role_names: dict[UUID, tuple[float, str]] = {}
+
+
 class ProductionService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.inventory = InventoryService(session)
 
+    async def _role_name(self, role_id: UUID) -> str:
+        import time
+
+        now = time.monotonic()
+        hit = _role_names.get(role_id)
+        if hit is not None and now - hit[0] < 20:
+            return hit[1]
+        role = await self.session.get(Role, role_id)
+        name = role.role_name if role else ""
+        _role_names[role_id] = (now, name)
+        return name
+
     async def list_jobs(
         self, pagination: PaginationParams, actor: User
     ) -> PaginatedResponse[ProductionJobRead]:
-        query = select(ProductionJob).order_by(ProductionJob.created_at.desc())
-        role = await self.session.get(Role, actor.role_id)
-        role_name = role.role_name if role else ""
+        query = (
+            select(ProductionJob, Product.product_name, Operation.name)
+            .outerjoin(Product, Product.id == ProductionJob.product_id)
+            .outerjoin(Operation, Operation.id == ProductionJob.current_operation_id)
+            .order_by(ProductionJob.created_at.desc())
+        )
+        role_name = await self._role_name(actor.role_id)
         if role_has(role_name, VIEW_ASSIGNED_WORK) and not role_has(role_name, "approve_jobs"):
             if role_name == "staff":
                 stage_jobs = await self.session.scalars(
@@ -60,16 +79,75 @@ class ProductionService:
                 if not ids:
                     return to_page([], 0, pagination)
                 query = query.where(ProductionJob.id.in_(ids))  # type: ignore[attr-defined]
-        result = await self.session.scalars(query)
-        rows = list(result)
+        rows = list((await self.session.execute(query)).all())
         total = len(rows)
         page = rows[pagination.offset : pagination.offset + pagination.page_size]
-        return to_page([await self._summary(row) for row in page], total, pagination)
+        rendered = [
+            ProductionJobRead(
+                id=job.id,
+                product_id=job.product_id,
+                product_name=product_name,
+                quantity=job.quantity,
+                status=job.status,
+                notes=job.notes,
+                estimated_minutes=job.estimated_minutes,
+                due_at=job.due_at,
+                started_at=job.started_at,
+                source=job.source,
+                overdue=bool(job.due_at and job.status == "in_progress" and job.due_at < _now()),
+                current_operation_name=operation_name,
+                produced_quantity=job.produced_quantity,
+            )
+            for job, product_name, operation_name in page
+        ]
+        return to_page(rendered, total, pagination)
 
     async def get_job(self, job_id: UUID, actor: User) -> ProductionJobDetail:
         job = await get_or_404(self.session, ProductionJob, job_id)
         await self._assert_visible(job, actor)
         return await self._detail(job)
+
+    async def _summaries(self, jobs: list[ProductionJob]) -> list[ProductionJobRead]:
+        if not jobs:
+            return []
+        product_ids = {job.product_id for job in jobs}
+        operation_ids = {job.current_operation_id for job in jobs if job.current_operation_id}
+        products = {
+            row.id: row
+            for row in await self.session.scalars(select(Product).where(Product.id.in_(product_ids)))
+        }
+        operations = (
+            {
+                row.id: row
+                for row in await self.session.scalars(
+                    select(Operation).where(Operation.id.in_(operation_ids))
+                )
+            }
+            if operation_ids
+            else {}
+        )
+        rendered: list[ProductionJobRead] = []
+        for job in jobs:
+            product = products.get(job.product_id)
+            operation = operations.get(job.current_operation_id) if job.current_operation_id else None
+            rendered.append(
+                ProductionJobRead(
+                    id=job.id,
+                    product_id=job.product_id,
+                    product_name=product.product_name if product else None,
+                    quantity=job.quantity,
+                    status=job.status,
+                    notes=job.notes,
+                    estimated_minutes=job.estimated_minutes,
+                    due_at=job.due_at,
+                    started_at=job.started_at,
+                    source=job.source,
+                    overdue=bool(job.due_at and job.status == "in_progress" and job.due_at < _now()),
+                    current_operation_name=operation.name if operation else None,
+                    produced_quantity=job.produced_quantity,
+                )
+            )
+        return rendered
 
     async def create_job(
         self, data: ProductionJobCreate, actor: User, *, commit: bool = True
