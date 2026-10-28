@@ -33,6 +33,12 @@ class Invoice(Entity, table=True):
     delivery_charge: Decimal = Field(default=Decimal("0"), sa_type=Numeric(12, 2), nullable=False)
     total_amount: Decimal = Field(default=Decimal("0"), sa_type=Numeric(12, 2), nullable=False)
     amount_paid: Decimal = Field(default=Decimal("0"), sa_type=Numeric(12, 2), nullable=False)
+    pdf_attachment_id: UUID | None = Field(
+        default=None,
+        foreign_key="attachments.id",
+        nullable=True,
+        ondelete="SET NULL",
+    )
 
 
 class InvoiceLine(Entity, table=True):

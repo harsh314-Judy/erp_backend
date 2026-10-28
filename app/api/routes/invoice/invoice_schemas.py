@@ -5,6 +5,41 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class InvoiceLinePrice(BaseModel):
+    line_id: UUID
+    mrp: Decimal = Field(ge=0)
+    gst_percent: Decimal = Field(ge=0, le=100)
+
+
+class InvoiceIssue(BaseModel):
+    lines: list[InvoiceLinePrice] = Field(min_length=1)
+
+
+class InvoiceDraftLine(BaseModel):
+    line_id: UUID
+    product_name: str
+    quantity: Decimal
+    unit: str
+    mrp: Decimal
+    gst_percent: Decimal
+
+
+class InvoiceDraft(BaseModel):
+    customer_name: str
+    customer_address: str
+    customer_state: str
+    customer_gst_number: str | None
+    customer_phone: str
+    delivery_charge: Decimal
+    same_state: bool
+    seller_name: str
+    seller_gstin: str
+    lines: list[InvoiceDraftLine]
+    has_pdf: bool
+    invoice_id: UUID | None = None
+    invoice_number: str | None = None
+
+
 class InvoiceLineRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -57,3 +92,4 @@ class InvoiceRead(BaseModel):
     amount_paid: Decimal
     lines: list[InvoiceLineRead] = []
     payments: list[PaymentRead] = []
+    has_pdf: bool = False

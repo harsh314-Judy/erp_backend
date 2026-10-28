@@ -43,14 +43,18 @@ async def list_models(
     model: type[ModelT],
     pagination: PaginationParams,
 ) -> tuple[list[ModelT], int]:
-    total = await session.scalar(select(func.count()).select_from(model))
-    result = await session.scalars(
-        select(model)
+    total_column = func.count().over().label("_total")
+    result = await session.execute(
+        select(model, total_column)
         .order_by(model.created_at.desc())  # type: ignore[attr-defined]
         .offset(pagination.offset)
         .limit(pagination.page_size)
     )
-    return list(result), int(total or 0)
+    packed = result.all()
+    if not packed:
+        total = int(await session.scalar(select(func.count()).select_from(model)) or 0)
+        return [], total
+    return [row[0] for row in packed], int(packed[0][1] or 0)
 
 
 async def create_model(session: AsyncSession, model: type[ModelT], data: BaseModel) -> ModelT:
