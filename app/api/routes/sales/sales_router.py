@@ -18,6 +18,7 @@ from app.api.routes.sales.sales_schemas import (
     SaleUpdate,
     SalesOrderCreate,
     SalesOrderRead,
+    SalesOrderStatusUpdate,
 )
 from app.api.routes.user.user_model import Role
 from app.api.security.permissions import MANAGE_SALES, can_see_prices, forbid, role_has
@@ -88,6 +89,18 @@ async def assign_packaging(
     return await service.assign_packaging(
         order_id, data.packaging_user_id, show_prices=can_see_prices(name)
     )
+
+
+@router.patch("/orders/{order_id}", response_model=SalesOrderRead, response_model_exclude_none=True)
+async def update_order_status(
+    order_id: UUID,
+    data: SalesOrderStatusUpdate,
+    service: SalesOrderServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> SalesOrderRead:
+    name = await _sales_role(session, user)
+    return await service.set_status(order_id, data.status, user, show_prices=can_see_prices(name))
 
 
 @router.post("/orders/{order_id}/dispatch", response_model=SalesOrderRead)

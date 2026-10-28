@@ -27,7 +27,7 @@ class ReportService:
                     """
                     SELECT
                       (SELECT count(*) FROM sales_orders) AS total_orders,
-                      (SELECT count(*) FROM sales_orders WHERE status = 'open') AS pending_orders,
+                      (SELECT count(*) FROM sales_orders WHERE status IN ('open', 'initiated', 'process', 'in_delivery')) AS pending_orders,
                       (SELECT coalesce(sum(total_amount), 0) FROM invoices) AS total_sales,
                       (SELECT coalesce(sum(total_amount), 0) FROM invoices
                         WHERE cgst_amount + sgst_amount + igst_amount > 0) AS gst_sales,
@@ -154,7 +154,7 @@ class ReportService:
                       (SELECT count(*) FROM purchase_orders
                         WHERE status IN ('ordered', 'arrived')) AS incoming,
                       (SELECT count(*) FROM sales_orders) AS total_orders,
-                      (SELECT count(*) FROM sales_orders WHERE status = 'open') AS pending_orders,
+                      (SELECT count(*) FROM sales_orders WHERE status IN ('open', 'initiated', 'process', 'in_delivery')) AS pending_orders,
                       (SELECT coalesce(sum(total_amount), 0) FROM invoices) AS total_sales,
                       (SELECT coalesce(sum(total_amount), 0) FROM invoices
                         WHERE cgst_amount + sgst_amount + igst_amount > 0) AS gst_sales,
