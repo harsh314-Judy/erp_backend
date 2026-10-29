@@ -10,7 +10,11 @@ from app.api.routes.production.production_schemas import (
     ProductionJobCreate,
     ProductionJobDetail,
     ProductionJobRead,
+    ProductionJobUpdate,
+    RequirementUpdate,
     StageComplete,
+    StageRevert,
+    VarianceCreate,
 )
 from app.api.routes.user.user_model import Role
 from app.api.schemas.pagination import PaginatedResponse, PaginationDep
@@ -56,6 +60,20 @@ async def create_job(
     return await service.create_job(data, user)
 
 
+@router.patch("/{job_id}", response_model=ProductionJobDetail)
+async def update_job(
+    job_id: UUID,
+    data: ProductionJobUpdate,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if name != "super_admin":
+        forbid()
+    return await service.update_job(job_id, data, user)
+
+
 @router.get("/{job_id}", response_model=ProductionJobDetail)
 async def get_job(
     job_id: UUID,
@@ -95,6 +113,48 @@ async def complete_stage(
     if not role_has(name, VIEW_ASSIGNED_WORK) and not role_has(name, EDIT_INVENTORY):
         forbid()
     return await service.complete_stage(job_id, stage_id, data, user)
+
+
+@router.post("/{job_id}/revert", response_model=ProductionJobDetail)
+async def revert_stage(
+    job_id: UUID,
+    data: StageRevert,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not (role_has(name, VIEW_ASSIGNED_WORK) or role_has(name, EDIT_INVENTORY) or role_has(name, APPROVE_JOBS)):
+        forbid()
+    return await service.revert_stage(job_id, data, user)
+
+
+@router.post("/{job_id}/requirements", response_model=ProductionJobDetail)
+async def update_requirements(
+    job_id: UUID,
+    data: RequirementUpdate,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not role_has(name, APPROVE_JOBS):
+        forbid()
+    return await service.update_requirements(job_id, data, user)
+
+
+@router.post("/{job_id}/variances", response_model=ProductionJobDetail)
+async def log_variance(
+    job_id: UUID,
+    data: VarianceCreate,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not (role_has(name, VIEW_ASSIGNED_WORK) or role_has(name, EDIT_INVENTORY) or role_has(name, APPROVE_JOBS)):
+        forbid()
+    return await service.log_variance(job_id, data, user)
 
 
 @router.post("/{job_id}/approve", response_model=ProductionJobDetail)

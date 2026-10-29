@@ -4,8 +4,10 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import select
 
+from app.api.routes.inventory.inventory_model import StockReservation
 from app.api.routes.inventory.inventory_services import InventoryService, users_for_operation
 from app.api.routes.invoice.gst import qty
 from app.api.routes.notification.notification_services import notify
@@ -21,11 +23,17 @@ from app.api.routes.production.production_schemas import (
     InputRead,
     JobApprove,
     JobCancel,
+    JobEvent,
     ProductionJobCreate,
     ProductionJobDetail,
     ProductionJobRead,
+    ProductionJobUpdate,
+    RequirementUpdate,
     StageComplete,
     StageRead,
+    StageRevert,
+    VarianceCreate,
+    VarianceRead,
 )
 from app.api.routes.raw_material.raw_material_model import RawMaterial
 from app.api.routes.user.user_model import Role, User
@@ -36,6 +44,22 @@ from app.db.repository import commit_or_conflict, get_or_404, to_page
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _person(actor: User) -> str:
+    name = " ".join(part for part in (actor.first_name, actor.last_name) if part).strip()
+    return name or "User"
+
+
+def _stamp(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 _role_names: dict[UUID, tuple[float, str]] = {}
@@ -83,22 +107,7 @@ class ProductionService:
         total = len(rows)
         page = rows[pagination.offset : pagination.offset + pagination.page_size]
         rendered = [
-            ProductionJobRead(
-                id=job.id,
-                product_id=job.product_id,
-                product_name=product_name,
-                quantity=job.quantity,
-                status=job.status,
-                notes=job.notes,
-                estimated_minutes=job.estimated_minutes,
-                due_at=job.due_at,
-                started_at=job.started_at,
-                source=job.source,
-                overdue=bool(job.due_at and job.status == "in_progress" and job.due_at < _now()),
-                current_operation_name=operation_name,
-                produced_quantity=job.produced_quantity,
-            )
-            for job, product_name, operation_name in page
+            await self._read(job, product_name, operation_name) for job, product_name, operation_name in page
         ]
         return to_page(rendered, total, pagination)
 
@@ -131,20 +140,10 @@ class ProductionService:
             product = products.get(job.product_id)
             operation = operations.get(job.current_operation_id) if job.current_operation_id else None
             rendered.append(
-                ProductionJobRead(
-                    id=job.id,
-                    product_id=job.product_id,
-                    product_name=product.product_name if product else None,
-                    quantity=job.quantity,
-                    status=job.status,
-                    notes=job.notes,
-                    estimated_minutes=job.estimated_minutes,
-                    due_at=job.due_at,
-                    started_at=job.started_at,
-                    source=job.source,
-                    overdue=bool(job.due_at and job.status == "in_progress" and job.due_at < _now()),
-                    current_operation_name=operation.name if operation else None,
-                    produced_quantity=job.produced_quantity,
+                await self._read(
+                    job,
+                    product.product_name if product else None,
+                    operation.name if operation else None,
                 )
             )
         return rendered
@@ -157,23 +156,30 @@ class ProductionService:
         if not operation_ids:
             raise HTTPException(status_code=400, detail="Choose at least one operation")
         first = await get_or_404(self.session, Operation, operation_ids[0])
+        if data.assigned_user_id is not None:
+            await get_or_404(self.session, User, data.assigned_user_id)
         job = ProductionJob(
             product_id=product.id,
             current_operation_id=first.id,
             notes=data.notes,
             quantity=qty(data.quantity),
             estimated_minutes=data.estimated_minutes,
+            due_at=data.deadline,
             source=data.source,
             source_id=data.source_id,
             created_by_user_id=actor.id,
             raw_material_used={},
-            operation_flow={str(index): str(operation_id) for index, operation_id in enumerate(operation_ids)},
+            operation_flow={
+                str(index): str(operation_id) for index, operation_id in enumerate(operation_ids)
+            }
+            | ({"deadline_set": True} if data.deadline is not None else {}),
             product_used={},
             raw_material_used_after_production={},
             product_used_after_production={},
         )
         self.session.add(job)
         await self.session.flush()
+        self._append_event(job, actor, "created", None, "Job opened")
         for index, operation_id in enumerate(operation_ids):
             managers = await users_for_operation(self.session, operation_id)
             self.session.add(
@@ -181,7 +187,8 @@ class ProductionService:
                     job_id=job.id,
                     operation_id=operation_id,
                     position=index,
-                    assigned_user_id=managers[0] if managers else product.responsible_user_id,
+                    assigned_user_id=data.assigned_user_id
+                    or (managers[0] if managers else product.responsible_user_id),
                     status="active" if index == 0 else "pending",
                 )
             )
@@ -256,6 +263,105 @@ class ProductionService:
                     kind="job_stage",
                     link="/staff",
                 )
+        mode = f" ({data.polish_type})" if data.polish_type else ""
+        moved = "awaiting approval"
+        if upcoming is not None:
+            nxt = await self.session.get(Operation, upcoming.operation_id)
+            moved = nxt.name if nxt else "the next stage"
+        detail = f"Finished {operation.name}{mode} → {moved}"
+        if data.notes and data.notes.strip():
+            detail = f"{detail}. {data.notes.strip()}"
+        self._append_event(job, actor, "advanced", operation.name, detail)
+        self.session.add(job)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
+    async def revert_stage(self, job_id: UUID, data: StageRevert, actor: User) -> ProductionJobDetail:
+        job = await get_or_404(self.session, ProductionJob, job_id)
+        if job.status not in {"in_progress", "awaiting_approval"}:
+            raise HTTPException(status_code=409, detail="This job has no stage to step back to")
+        stages = await self._stages(job.id)
+        done = [stage for stage in stages if stage.status == "done"]
+        if not done:
+            raise HTTPException(status_code=409, detail="This job is already on the first stage")
+        previous = done[-1]
+        active = next((stage for stage in stages if stage.status == "active"), None)
+        if active is not None:
+            active.status = "pending"
+            active.started_at = None
+            self.session.add(active)
+        operation = await get_or_404(self.session, Operation, previous.operation_id)
+        was = previous.polish_type
+        previous.status = "active"
+        previous.completed_at = None
+        previous.polish_type = None
+        previous.started_at = _now()
+        self.session.add(previous)
+        job.status = next_status(job.status, "revert")
+        job.current_operation_id = previous.operation_id
+        note = data.note.strip()
+        detail = f"Stepped back to {operation.name}"
+        if was:
+            detail = f"{detail} (was {was})"
+        detail = f"{detail}. {note}"
+        self._append_event(job, actor, "reverted", operation.name, detail)
+        self.session.add(job)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
+    async def update_requirements(
+        self, job_id: UUID, data: RequirementUpdate, actor: User
+    ) -> ProductionJobDetail:
+        job = await get_or_404(self.session, ProductionJob, job_id)
+        if job.status not in {"in_progress", "awaiting_approval"}:
+            raise HTTPException(status_code=409, detail="Requirements can change only while the job is open")
+        inputs = {item.id: item for item in await self._inputs(job.id)}
+        changes: list[str] = []
+        for line in data.inputs:
+            item = inputs.get(line.input_id)
+            if item is None:
+                raise HTTPException(status_code=404, detail="That material is not on this job")
+            new_qty = qty(line.planned_quantity)
+            old = qty(item.planned_quantity)
+            if new_qty == old:
+                continue
+            await self._resize_hold(item, old, new_qty)
+            item.planned_quantity = new_qty
+            self.session.add(item)
+            changes.append(f"{await self._input_name(item)} {old} → {new_qty}")
+        if not changes:
+            raise HTTPException(status_code=400, detail="Nothing changed")
+        stage_name = await self._current_stage_name(job)
+        detail = f"{data.note.strip()} ({'; '.join(changes)})"
+        self._append_event(job, actor, "requirement", stage_name, detail)
+        self.session.add(job)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
+    async def log_variance(self, job_id: UUID, data: VarianceCreate, actor: User) -> ProductionJobDetail:
+        job = await get_or_404(self.session, ProductionJob, job_id)
+        if job.status not in {"in_progress", "awaiting_approval"}:
+            raise HTTPException(status_code=409, detail="Variances are logged while the job is open")
+        stage_name = await self._current_stage_name(job)
+        used = dict(job.product_used or {})
+        lines = list(used.get("lines") or [])
+        entry = {
+            "at": _now().isoformat(),
+            "user_name": _person(actor),
+            "kind": data.kind,
+            "item_name": data.item_name.strip(),
+            "quantity": str(qty(data.quantity)),
+            "note": data.note.strip(),
+            "stage": stage_name,
+        }
+        lines.append(entry)
+        used["lines"] = lines
+        job.product_used = used
+        flag_modified(job, "product_used")
+        label = {"waste": "Wasted", "extra_used": "Used extra", "extra_made": "Made extra"}[data.kind]
+        detail = f"{label} {entry['quantity']} {entry['item_name']} — {entry['note']}"
+        self._append_event(job, actor, "variance", stage_name, detail)
+        self.session.add(job)
         await commit_or_conflict(self.session)
         return await self._detail(job)
 
@@ -339,12 +445,21 @@ class ProductionService:
             self.session.add(item)
         job.status = next_status("pending", "start")
         job.started_at = _now()
-        job.due_at = job.started_at + timedelta(minutes=job.estimated_minutes)
+        if job.due_at is None:
+            job.due_at = job.started_at + timedelta(minutes=job.estimated_minutes)
         stages = await self._stages(job.id)
         if stages:
             stages[0].status = "active"
             stages[0].started_at = job.started_at
             self.session.add(stages[0])
+            first = await self.session.get(Operation, stages[0].operation_id)
+            self._append_event(
+                job,
+                actor,
+                "started",
+                first.name if first else None,
+                "Stock held and the first stage opened",
+            )
             if stages[0].assigned_user_id is not None:
                 await notify(
                     self.session,
@@ -456,13 +571,31 @@ class ProductionService:
     async def _summary(self, job: ProductionJob) -> ProductionJobRead:
         product = await self.session.get(Product, job.product_id)
         operation = await self.session.get(Operation, job.current_operation_id)
-        overdue = bool(
-            job.due_at and job.status == "in_progress" and job.due_at < _now()
+        return await self._read(
+            job,
+            product.product_name if product else None,
+            operation.name if operation else None,
         )
+
+    async def _read(
+        self, job: ProductionJob, product_name: str | None, operation_name: str | None
+    ) -> ProductionJobRead:
+        creator = None
+        if job.created_by_user_id is not None:
+            person = await self.session.get(User, job.created_by_user_id)
+            if person is not None:
+                creator = _person(person)
+        assignee_id = await self._assignee_id(job.id)
+        assignee = None
+        if assignee_id is not None:
+            person = await self.session.get(User, assignee_id)
+            if person is not None:
+                assignee = _person(person)
+        open_job = job.status in {"pending", "in_progress", "awaiting_approval"}
         return ProductionJobRead(
             id=job.id,
             product_id=job.product_id,
-            product_name=product.product_name if product else None,
+            product_name=product_name,
             quantity=job.quantity,
             status=job.status,
             notes=job.notes,
@@ -470,10 +603,67 @@ class ProductionService:
             due_at=job.due_at,
             started_at=job.started_at,
             source=job.source,
-            overdue=overdue,
-            current_operation_name=operation.name if operation else None,
+            overdue=bool(job.due_at and open_job and job.due_at < _now()),
+            current_operation_name=operation_name,
             produced_quantity=job.produced_quantity,
+            created_at=job.created_at,
+            created_by_name=creator,
+            assigned_user_id=assignee_id,
+            assigned_user_name=assignee,
         )
+
+    async def _assignee_id(self, job_id: UUID) -> UUID | None:
+        stages = await self._stages(job_id)
+        active = next((stage for stage in stages if stage.status == "active" and stage.assigned_user_id), None)
+        if active is not None:
+            return active.assigned_user_id
+        for stage in stages:
+            if stage.assigned_user_id is not None:
+                return stage.assigned_user_id
+        return None
+
+    async def update_job(self, job_id: UUID, data: ProductionJobUpdate, actor: User) -> ProductionJobDetail:
+        job = await get_or_404(self.session, ProductionJob, job_id)
+        if job.status in {"completed", "cancelled"}:
+            raise HTTPException(status_code=409, detail="A closed job cannot be edited")
+        changes = data.model_dump(exclude_unset=True)
+        notes: list[str] = []
+        if "quantity" in changes and changes["quantity"] is not None:
+            job.quantity = qty(changes["quantity"])
+            notes.append(f"target {job.quantity}")
+        if "notes" in changes:
+            job.notes = changes["notes"]
+            notes.append("instructions")
+        if "estimated_minutes" in changes and changes["estimated_minutes"] is not None:
+            job.estimated_minutes = changes["estimated_minutes"]
+            notes.append(f"duration {job.estimated_minutes} min")
+        if "deadline" in changes:
+            job.due_at = changes["deadline"]
+            notes.append("deadline" if job.due_at else "deadline cleared")
+            flow = dict(job.operation_flow or {})
+            reminders = dict(flow.get("reminders") or {})
+            reminders.pop("deadline", None)
+            flow["reminders"] = reminders
+            if job.due_at is None:
+                flow.pop("deadline_set", None)
+            else:
+                flow["deadline_set"] = True
+            job.operation_flow = flow
+            flag_modified(job, "operation_flow")
+        if "assigned_user_id" in changes and changes["assigned_user_id"] is not None:
+            await get_or_404(self.session, User, changes["assigned_user_id"])
+            for stage in await self._stages(job.id):
+                stage.assigned_user_id = changes["assigned_user_id"]
+                self.session.add(stage)
+            person = await self.session.get(User, changes["assigned_user_id"])
+            notes.append(f"assigned to {_person(person)}" if person else "assignee")
+        if not notes:
+            raise HTTPException(status_code=400, detail="Nothing changed")
+        stage_name = await self._current_stage_name(job)
+        self._append_event(job, actor, "edited", stage_name, "Edited the job: " + ", ".join(notes))
+        self.session.add(job)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
 
     async def _detail(self, job: ProductionJob) -> ProductionJobDetail:
         summary = await self._summary(job)
@@ -509,4 +699,127 @@ class ProductionService:
             stages=stages,
             inputs=inputs,
             cancellation_reason=job.cancellation_reason,
+            events=self._events(job),
+            variances=self._variances(job),
         )
+
+    def _append_event(
+        self,
+        job: ProductionJob,
+        actor: User,
+        action: str,
+        stage: str | None,
+        detail: str,
+    ) -> None:
+        flow = dict(job.operation_flow or {})
+        events = list(flow.get("log") or [])
+        events.append(
+            {
+                "at": _now().isoformat(),
+                "user_name": _person(actor),
+                "action": action,
+                "stage": stage,
+                "detail": detail,
+            }
+        )
+        flow["log"] = events
+        job.operation_flow = flow
+        flag_modified(job, "operation_flow")
+        self.session.add(job)
+
+    def _events(self, job: ProductionJob) -> list[JobEvent]:
+        raw = (job.operation_flow or {}).get("log") or []
+        events: list[JobEvent] = []
+        if not isinstance(raw, list):
+            return events
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            at = _stamp(item.get("at"))
+            if at is None:
+                continue
+            events.append(
+                JobEvent(
+                    at=at,
+                    user_name=str(item.get("user_name") or "User"),
+                    action=str(item.get("action") or "note"),
+                    stage=item.get("stage") if isinstance(item.get("stage"), str) else None,
+                    detail=str(item.get("detail") or ""),
+                )
+            )
+        events.reverse()
+        return events
+
+    def _variances(self, job: ProductionJob) -> list[VarianceRead]:
+        raw = (job.product_used or {}).get("lines") or []
+        rows: list[VarianceRead] = []
+        if not isinstance(raw, list):
+            return rows
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            at = _stamp(item.get("at"))
+            if at is None:
+                continue
+            rows.append(
+                VarianceRead(
+                    at=at,
+                    user_name=str(item.get("user_name") or "User"),
+                    kind=str(item.get("kind") or "waste"),
+                    item_name=str(item.get("item_name") or "Item"),
+                    quantity=str(item.get("quantity") or "0"),
+                    note=str(item.get("note") or ""),
+                    stage=item.get("stage") if isinstance(item.get("stage"), str) else None,
+                )
+            )
+        rows.reverse()
+        return rows
+
+    async def _current_stage_name(self, job: ProductionJob) -> str | None:
+        stages = await self._stages(job.id)
+        active = next((stage for stage in stages if stage.status == "active"), None)
+        target = active or (stages[-1] if stages else None)
+        if target is None:
+            return None
+        operation = await self.session.get(Operation, target.operation_id)
+        return operation.name if operation else None
+
+    async def _input_name(self, item: ProductionJobInput) -> str:
+        if item.product_id is not None:
+            product = await self.session.get(Product, item.product_id)
+            return product.product_name if product else "Product"
+        if item.raw_material_id is not None:
+            material = await self.session.get(RawMaterial, item.raw_material_id)
+            return material.name if material else "Material"
+        return "Item"
+
+    async def _resize_hold(self, item: ProductionJobInput, old: Decimal, new_qty: Decimal) -> None:
+        reservation = None
+        if item.reservation_id is not None:
+            reservation = await self.session.get(StockReservation, item.reservation_id)
+            if reservation is None or reservation.status != "held":
+                reservation = None
+                item.reservation_id = None
+        if reservation is None:
+            if new_qty <= 0:
+                return
+            held = await self.inventory.hold(
+                quantity=new_qty,
+                source_type="production_job_input",
+                source_id=item.id,
+                product_id=item.product_id,
+                raw_material_id=item.raw_material_id,
+            )
+            item.reservation_id = held.id
+            return
+        delta = new_qty - old
+        if delta > 0:
+            free = await self._free(item)
+            if free < delta:
+                raise HTTPException(status_code=409, detail="Not enough free stock to raise this requirement")
+        if new_qty <= 0:
+            await self.inventory.release(reservation.id)
+            item.reservation_id = None
+            return
+        reservation.quantity = new_qty
+        self.session.add(reservation)
