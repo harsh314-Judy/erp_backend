@@ -18,6 +18,13 @@ from app.db.repository import (
     update_model,
 )
 
+ORDER_STATUSES = {"initiated", "process", "in_delivery", "delivered", "cancelled"}
+_LEGACY_STATUS = {"open": "initiated", "dispatched": "delivered"}
+
+
+def canonical_status(status: str) -> str:
+    return _LEGACY_STATUS.get(status, status)
+
 
 class SalesService:
     def __init__(self, session: AsyncSession) -> None:
@@ -64,6 +71,7 @@ class SalesOrderService:
                       o.notes,
                       o.status,
                       o.packaging_user_id,
+                      nullif(btrim(concat(u.first_name, ' ', coalesce(u.last_name, ''))), '') AS packaging_name,
                       o.delivery_charge,
                       coalesce((
                         SELECT json_agg(json_build_object(
@@ -80,9 +88,11 @@ class SalesOrderService:
                         WHERE l.sales_order_id = o.id
                       ), '[]'::json) AS lines,
                       i.id AS invoice_id,
-                      (i.pdf_attachment_id IS NOT NULL) AS invoice_has_pdf
+                      (i.pdf_attachment_id IS NOT NULL) AS invoice_has_pdf,
+                      o.updated_at
                     FROM sales_orders o
                     LEFT JOIN customers c ON c.id = o.customer_id
+                    LEFT JOIN users u ON u.id = o.packaging_user_id
                     LEFT JOIN invoices i ON i.sales_order_id = o.id
                     ORDER BY o.created_at DESC
                     """
@@ -100,8 +110,9 @@ class SalesOrderService:
                     customer_id=row["customer_id"],
                     customer_name=row["customer_name"],
                     notes=row["notes"],
-                    status=row["status"],
+                    status=canonical_status(row["status"]),
                     packaging_user_id=row["packaging_user_id"],
+                    packaging_name=row["packaging_name"],
                     delivery_charge=row["delivery_charge"] if show_prices else 0,
                     lines=[
                         SalesOrderLineRead(
@@ -117,6 +128,7 @@ class SalesOrderService:
                     ],
                     invoice_id=row["invoice_id"],
                     invoice_has_pdf=bool(row["invoice_has_pdf"]),
+                    updated_at=row["updated_at"],
                 )
             )
         return rendered
@@ -128,7 +140,9 @@ class SalesOrderService:
         from app.api.routes.sales.sales_model import SalesOrder
 
         order_ids = list(
-            await self.session.scalars(select(SalesOrder.id).where(SalesOrder.status == "dispatched"))
+            await self.session.scalars(
+                select(SalesOrder.id).where(SalesOrder.status.in_(("dispatched", "delivered")))
+            )
         )
         if not order_ids:
             return 0
@@ -173,6 +187,7 @@ class SalesOrderService:
         order = SalesOrder(
             customer_id=customer.id,
             notes=data.notes,
+            status="initiated",
             packaging_user_id=packaging_user_id,
             created_by_user_id=actor.id,
             delivery_charge=company.delivery_charge,
@@ -265,13 +280,55 @@ class SalesOrderService:
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices)
 
-    async def dispatch(self, order_id: UUID, actor: User, *, show_prices: bool) -> SalesOrderRead:
-        from app.api.routes.inventory.inventory_services import InventoryService
-        from app.api.routes.sales.sales_model import SalesOrder, SalesOrderLine
+    async def set_status(
+        self, order_id: UUID, status: str, actor: User, *, show_prices: bool
+    ) -> SalesOrderRead:
+        from app.api.routes.sales.sales_model import SalesOrder
 
         order = await get_or_404(self.session, SalesOrder, order_id)
-        if order.status != "open":
-            raise HTTPException(status_code=409, detail="This order is not open")
+        current = canonical_status(order.status)
+        target = canonical_status(status.strip().lower().replace(" ", "_"))
+        if target not in ORDER_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail="Status must be initiated, process, in delivery, delivered, or cancelled",
+            )
+        if current == target:
+            return await self._read(order, show_prices)
+        if current in {"delivered", "cancelled"}:
+            raise HTTPException(status_code=409, detail="This order can no longer change status")
+        if target == "delivered" and current != "in_delivery":
+            raise HTTPException(status_code=409, detail="Mark the order in delivery before dispatching it")
+        if target == "cancelled":
+            await self._release_holds(order)
+        elif target == "delivered":
+            await self._consume_holds(order, actor)
+        order.status = target
+        self.session.add(order)
+        await commit_or_conflict(self.session)
+        return await self._read(order, show_prices)
+
+    async def dispatch(self, order_id: UUID, actor: User, *, show_prices: bool) -> SalesOrderRead:
+        return await self.set_status(order_id, "delivered", actor, show_prices=show_prices)
+
+    async def _release_holds(self, order) -> None:
+        from app.api.routes.inventory.inventory_services import InventoryService
+        from app.api.routes.sales.sales_model import SalesOrderLine
+
+        lines = list(
+            await self.session.scalars(
+                select(SalesOrderLine).where(SalesOrderLine.sales_order_id == order.id)
+            )
+        )
+        inventory = InventoryService(self.session)
+        for line in lines:
+            if line.reservation_id is not None:
+                await inventory.release(line.reservation_id)
+
+    async def _consume_holds(self, order, actor: User) -> None:
+        from app.api.routes.inventory.inventory_services import InventoryService
+        from app.api.routes.sales.sales_model import SalesOrderLine
+
         lines = list(
             await self.session.scalars(
                 select(SalesOrderLine).where(SalesOrderLine.sales_order_id == order.id)
@@ -289,10 +346,6 @@ class SalesOrderService:
                 source_id=order.id,
                 note="Dispatched",
             )
-        order.status = "dispatched"
-        self.session.add(order)
-        await commit_or_conflict(self.session)
-        return await self._read(order, show_prices)
 
     async def _read(self, order, show_prices: bool) -> SalesOrderRead:
         from app.api.routes.customer.customer_model import Customer
@@ -301,7 +354,15 @@ class SalesOrderService:
         from app.api.routes.sales.sales_model import SalesOrderLine
         from app.api.routes.sales.sales_schemas import SalesOrderLineRead, SalesOrderRead
 
+        from app.api.routes.user.user_model import User
+
         customer = await self.session.get(Customer, order.customer_id)
+        packer = (
+            await self.session.get(User, order.packaging_user_id) if order.packaging_user_id else None
+        )
+        packaging_name = (
+            " ".join(part for part in (packer.first_name, packer.last_name) if part) if packer else None
+        )
         lines = list(
             await self.session.scalars(
                 select(SalesOrderLine).where(SalesOrderLine.sales_order_id == order.id)
@@ -327,10 +388,12 @@ class SalesOrderService:
             customer_id=order.customer_id,
             customer_name=customer.name if customer else None,
             notes=order.notes,
-            status=order.status,
+            status=canonical_status(order.status),
             packaging_user_id=order.packaging_user_id,
+            packaging_name=packaging_name or None,
             delivery_charge=order.delivery_charge if show_prices else 0,
             lines=rendered,
             invoice_id=invoice.id if invoice else None,
             invoice_has_pdf=bool(invoice and invoice.pdf_attachment_id),
+            updated_at=order.updated_at,
         )

@@ -21,6 +21,7 @@ class InvoiceDraftLine(BaseModel):
     quantity: Decimal
     unit: str
     mrp: Decimal
+    catalog_price: Decimal
     gst_percent: Decimal
 
 

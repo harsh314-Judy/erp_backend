@@ -13,11 +13,60 @@ class ProductionJobCreate(BaseModel):
     operation_ids: list[UUID] | None = None
     source: str = "manual"
     source_id: UUID | None = None
+    deadline: datetime | None = None
+    assigned_user_id: UUID | None = None
+
+
+class ProductionJobUpdate(BaseModel):
+    quantity: Decimal | None = Field(default=None, gt=0)
+    notes: str | None = None
+    estimated_minutes: int | None = Field(default=None, ge=1)
+    deadline: datetime | None = None
+    assigned_user_id: UUID | None = None
 
 
 class StageComplete(BaseModel):
     polish_type: str | None = None
     notes: str | None = None
+
+
+class StageRevert(BaseModel):
+    note: str = Field(min_length=3)
+
+
+class RequirementLine(BaseModel):
+    input_id: UUID
+    planned_quantity: Decimal = Field(ge=0)
+
+
+class RequirementUpdate(BaseModel):
+    note: str = Field(min_length=3)
+    inputs: list[RequirementLine] = Field(min_length=1)
+
+
+class VarianceCreate(BaseModel):
+    kind: str = Field(pattern="^(waste|extra_used|extra_made)$")
+    item_name: str = Field(min_length=1, max_length=120)
+    quantity: Decimal = Field(gt=0)
+    note: str = Field(min_length=3)
+
+
+class JobEvent(BaseModel):
+    at: datetime
+    user_name: str
+    action: str
+    stage: str | None = None
+    detail: str
+
+
+class VarianceRead(BaseModel):
+    at: datetime
+    user_name: str
+    kind: str
+    item_name: str
+    quantity: str
+    note: str
+    stage: str | None = None
 
 
 class InputActual(BaseModel):
@@ -81,9 +130,17 @@ class ProductionJobRead(BaseModel):
     overdue: bool = False
     current_operation_name: str | None = None
     produced_quantity: Decimal = Decimal("0")
+    created_at: datetime | None = None
+    created_by_name: str | None = None
+    assigned_user_id: UUID | None = None
+    assigned_user_name: str | None = None
 
 
 class ProductionJobDetail(ProductionJobRead):
     stages: list[StageRead]
     inputs: list[InputRead]
     cancellation_reason: str | None = None
+    created_at: datetime | None = None
+    created_by_name: str | None = None
+    events: list[JobEvent] = Field(default_factory=list)
+    variances: list[VarianceRead] = Field(default_factory=list)

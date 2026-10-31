@@ -172,7 +172,8 @@ class InvoiceService:
                     product_name=product.product_name,
                     quantity=line.quantity,
                     unit=unit.name if unit else "Nos",
-                    mrp=line.unit_price,
+                    mrp=line.unit_price if line.unit_price > 0 else product.sale_price_without_gst,
+                    catalog_price=product.sale_price_without_gst,
                     gst_percent=Decimal(product.gst_percent if product.gst else 0),
                 )
             )
@@ -204,8 +205,6 @@ class InvoiceService:
         if {item.line_id for item in data.lines} != set(by_id):
             raise HTTPException(status_code=400, detail="Set the MRP and GST for every line on the order")
         invoice = await self.session.scalar(select(Invoice).where(Invoice.sales_order_id == order.id))
-        if invoice is not None and invoice.pdf_attachment_id is not None:
-            raise HTTPException(status_code=409, detail="This order already has an invoice")
         same_state = _same_state(company.state, customer.state)
         if invoice is None:
             invoice = Invoice(
@@ -305,7 +304,8 @@ class InvoiceService:
                 seller_state=company.state,
             )
         )
-        filename = f"{SELLER_NAME}-{invoice.number.replace('/', '-')}.pdf"
+        completed_at = order.updated_at if order.status in {"delivered", "dispatched"} else None
+        filename = _bill_filename(customer.name, completed_at)
         stored = await attachments.store_bytes(
             self.session,
             filename=filename,
@@ -329,8 +329,6 @@ class InvoiceService:
         self, order_id: UUID
     ) -> tuple[SalesOrder, Customer, CompanySettings, list[SalesOrderLine], dict[UUID, Product]]:
         order = await get_or_404(self.session, SalesOrder, order_id)
-        if order.status != "dispatched":
-            raise HTTPException(status_code=400, detail="Dispatch the order before creating the invoice")
         customer = await get_or_404(self.session, Customer, order.customer_id)
         company = await self.session.scalar(select(CompanySettings))
         if company is None:
@@ -358,6 +356,17 @@ class InvoiceService:
         for row in rows:
             total = money(total + row.total_amount - row.amount_paid)
         return total
+
+
+def _bill_filename(customer_name: str, completed_at: datetime | None) -> str:
+    words = [word for word in (customer_name or "Order").split() if len(word) > 2]
+    initials = "".join(character for word in words for character in word[0].upper() if character.isalpha())
+    initials = initials or "SO"
+    if completed_at is None:
+        return f"{initials}.pdf"
+    moment = completed_at if completed_at.tzinfo else completed_at.replace(tzinfo=timezone.utc)
+    local = moment.astimezone(ZoneInfo(auth_settings.APP_TIMEZONE))
+    return f"{initials}-{local:%d-%m-%Y}.pdf"
 
 
 def _bill_date(moment: datetime) -> str:

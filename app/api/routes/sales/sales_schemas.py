@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -72,10 +73,16 @@ class SalesOrderRead(BaseModel):
     notes: str | None
     status: str
     packaging_user_id: UUID | None
+    packaging_name: str | None = None
     delivery_charge: Decimal
     lines: list[SalesOrderLineRead]
     invoice_id: UUID | None = None
     invoice_has_pdf: bool = False
+    updated_at: datetime | None = None
+
+
+class SalesOrderStatusUpdate(BaseModel):
+    status: str
 
 
 class PackagingAssign(BaseModel):

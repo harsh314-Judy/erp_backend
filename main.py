@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.bootstrap import bootstrap_super_admin
 from app.api.cleanup import refresh_cleanup_loop
+from app.api.routes.production.job_reminders import production_reminder_loop
 from app.api.main_router import main_router
 from app.api.security.access import AccessTokenMiddleware
 from app.api.security.csrf import CsrfMiddleware
@@ -30,10 +31,14 @@ async def lifespan(app: FastAPI):
     cleanup = asyncio.create_task(
         refresh_cleanup_loop(postgres_session._sessionmaker)
     )
+    reminders = asyncio.create_task(
+        production_reminder_loop(postgres_session._sessionmaker)
+    )
 
     yield
 
     cleanup.cancel()
+    reminders.cancel()
     await postgres_session.dispose()
 
 
