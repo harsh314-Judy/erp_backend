@@ -1,5 +1,10 @@
+import csv
+import io
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +18,9 @@ from app.api.routes.report.report_schemas import (
 )
 from app.api.routes.user.user_model import Role, User
 from app.api.security.permissions import VIEW_FINANCIALS, role_has
+
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 class ReportService:
@@ -140,6 +148,52 @@ class ReportService:
             items.append({"kind": "raw_material", "id": material["id"], "name": material["name"], **snapshot})
         return items
 
+    async def ca_csv(self, month: str) -> tuple[str, str]:
+        try:
+            start = datetime.strptime(month, "%Y-%m").replace(tzinfo=_IST)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Month must be YYYY-MM") from exc
+        if start.month == 12:
+            end = start.replace(year=start.year + 1, month=1)
+        else:
+            end = start.replace(month=start.month + 1)
+        rows = (
+            await self.session.execute(
+                text(
+                    """
+                    SELECT i.number, i.created_at, c.name AS customer_name, c.gst_number, c.state,
+                           i.taxable_amount, i.cgst_amount, i.sgst_amount, i.igst_amount,
+                           i.total_amount, i.amount_paid, i.status
+                    FROM invoices i
+                    JOIN customers c ON c.id = i.customer_id
+                    WHERE i.created_at >= :start AND i.created_at < :end
+                    ORDER BY i.created_at
+                    """
+                ),
+                {"start": start, "end": end},
+            )
+        ).mappings().all()
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow([
+            "invoice_number", "invoice_date", "customer_name", "gstin", "state",
+            "taxable_amount", "cgst", "sgst", "igst", "total", "amount_paid", "balance", "payment_status",
+        ])
+        for row in rows:
+            total = row["total_amount"] or 0
+            paid = row["amount_paid"] or 0
+            balance = total - paid
+            status = row["status"] or "unpaid"
+            if status not in {"paid", "partial", "unpaid"}:
+                status = "paid" if balance <= 0 else "partial" if paid else "unpaid"
+            created = row["created_at"]
+            local = created.astimezone(_IST).date().isoformat() if created else ""
+            writer.writerow([
+                row["number"], local, row["customer_name"], row["gst_number"] or "", row["state"] or "",
+                total, row["cgst_amount"], row["sgst_amount"], row["igst_amount"], total, paid, balance, status,
+            ])
+        return buffer.getvalue(), f"ca-{month}.csv"
+
     async def dashboard(self, actor: User) -> DashboardRead:
         row = (
             await self.session.execute(
@@ -152,7 +206,8 @@ class ReportService:
                       (SELECT count(*) FROM production_job_stages
                         WHERE assigned_user_id = :user_id AND status = 'active') AS my_jobs,
                       (SELECT count(*) FROM purchase_orders
-                        WHERE status IN ('ordered', 'arrived')) AS incoming,
+                        WHERE status IN ('initiated', 'process', 'in_delivery')
+                          AND stock_received = false) AS incoming,
                       (SELECT count(*) FROM sales_orders) AS total_orders,
                       (SELECT count(*) FROM sales_orders WHERE status IN ('open', 'initiated', 'process', 'in_delivery')) AS pending_orders,
                       (SELECT coalesce(sum(total_amount), 0) FROM invoices) AS total_sales,

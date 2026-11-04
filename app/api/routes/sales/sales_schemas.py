@@ -47,12 +47,16 @@ class SalesOrderLineWrite(BaseModel):
     product_id: UUID
     quantity: Decimal = Field(gt=0)
     shortfall_choice: str | None = None
+    source_purchase_order_id: UUID | None = None
 
 
 class SalesOrderCreate(BaseModel):
     customer_id: UUID
     notes: str | None = None
     packaging_user_id: UUID | None = None
+    dispatch_by: datetime | None = None
+    turnaround_days: int | None = Field(default=None, ge=1)
+    gst_billing: bool = True
     lines: list[SalesOrderLineWrite] = Field(min_length=1)
 
 
@@ -60,10 +64,12 @@ class SalesOrderLineRead(BaseModel):
     id: UUID
     product_id: UUID
     product_name: str | None = None
+    product_type: str | None = None
     quantity: Decimal
     held_quantity: Decimal
     unit_price: Decimal | None = None
     shortfall_choice: str | None = None
+    source_purchase_order_id: UUID | None = None
 
 
 class SalesOrderRead(BaseModel):
@@ -75,14 +81,23 @@ class SalesOrderRead(BaseModel):
     packaging_user_id: UUID | None
     packaging_name: str | None = None
     delivery_charge: Decimal
+    dispatch_by: datetime | None = None
+    turnaround_days: int | None = None
+    gst_billing: bool = True
     lines: list[SalesOrderLineRead]
     invoice_id: UUID | None = None
     invoice_has_pdf: bool = False
     updated_at: datetime | None = None
 
 
+class SalesSource(BaseModel):
+    line_id: UUID
+    source_purchase_order_id: UUID
+
+
 class SalesOrderStatusUpdate(BaseModel):
     status: str
+    sources: list[SalesSource] = Field(default_factory=list)
 
 
 class PackagingAssign(BaseModel):

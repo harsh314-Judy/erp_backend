@@ -100,7 +100,7 @@ async def update_order_status(
     user: CurrentUserDep,
 ) -> SalesOrderRead:
     name = await _sales_role(session, user)
-    return await service.set_status(order_id, data.status, user, show_prices=can_see_prices(name))
+    return await service.set_status(order_id, data.status, user, show_prices=can_see_prices(name), sources=data.sources)
 
 
 @router.post("/orders/{order_id}/dispatch", response_model=SalesOrderRead)

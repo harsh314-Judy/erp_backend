@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy import or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -41,8 +42,29 @@ class SupplierService:
         self.session = session
 
     async def list_suppliers(
-        self, pagination: PaginationParams
+        self, pagination: PaginationParams, q: str | None = None
     ) -> PaginatedResponse[SupplierRead]:
+        term = (q or "").strip()
+        if term:
+            like = f"%{term}%"
+            rows = list(
+                await self.session.scalars(
+                    select(Supplier)
+                    .where(
+                        or_(
+                            Supplier.supplier_company_name.ilike(like),
+                            Supplier.id.in_(
+                                select(RawMaterialSupplier.supplier_id)
+                                .join(RawMaterial, RawMaterial.id == RawMaterialSupplier.raw_material_id)
+                                .where(RawMaterial.name.ilike(like))
+                            ),
+                        )
+                    )
+                    .order_by(Supplier.supplier_company_name)
+                )
+            )
+            page = rows[pagination.offset : pagination.offset + pagination.page_size]
+            return to_page(await self._present_many(page), len(rows), pagination)
         rows, total = await list_models(self.session, Supplier, pagination)
         return to_page(await self._present_many(rows), total, pagination)
 

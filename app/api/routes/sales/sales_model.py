@@ -63,6 +63,9 @@ class SalesOrder(Entity, table=True):
         default=None, foreign_key="users.id", nullable=True, ondelete="SET NULL"
     )
     delivery_charge: Decimal = Field(default=Decimal("0"), sa_type=Numeric(12, 2), nullable=False)
+    dispatch_by: datetime | None = Field(default=None, sa_type=DateTime(timezone=True), nullable=True)
+    turnaround_days: int | None = Field(default=None, nullable=True)
+    gst_billing: bool = Field(default=True, nullable=False)
 
 
 class SalesOrderLine(Entity, table=True):
@@ -79,3 +82,10 @@ class SalesOrderLine(Entity, table=True):
     unit_price: Decimal = Field(sa_type=Numeric(12, 2), nullable=False)
     shortfall_choice: str | None = Field(default=None, max_length=16, nullable=True)
     reservation_id: UUID | None = Field(default=None, nullable=True)
+    source_purchase_order_id: UUID | None = Field(
+        default=None,
+        foreign_key="purchase_orders.id",
+        nullable=True,
+        index=True,
+        ondelete="SET NULL",
+    )

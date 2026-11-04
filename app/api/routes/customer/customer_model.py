@@ -8,6 +8,7 @@ class Customer(Entity, table=True):
     __tablename__ = "customers"
 
     name: str = Field(max_length=255, nullable=False, index=True)
+    contact_person_name: str | None = Field(default=None, max_length=150, nullable=True)
     is_company: bool = Field(default=False, nullable=False)
     gst_number: str | None = Field(default=None, max_length=20, nullable=True)
     address: str = Field(sa_type=Text, nullable=False)

@@ -8,6 +8,7 @@ from app.api.routes.user.user_model import User
 from app.db.repository import commit_or_conflict
 
 ORDER_STATUSES = {"initiated", "process", "in_delivery", "delivered", "cancelled"}
+SLIP_KINDS = {"dispatch_slip", "received_slip", "cargo_photo"}
 
 from app.api.routes.purchase_order.purchase_order_model import (
     PurchaseOrderProduct,
@@ -152,6 +153,8 @@ class PurchaseFlowService:
             order = PurchaseOrder(
                 supplier_id=supplier.id,
                 notes=data.get("notes"),
+                challan_number=(data.get("challan_number") or None),
+                challan_note=data.get("challan_note"),
                 expected_vehicle_plate=plate,
                 created_by_user_id=actor.id,
                 status=status,
@@ -159,6 +162,7 @@ class PurchaseFlowService:
             self.session.add(order)
             await self.session.flush()
             await self._add_line(order, supplier, line)
+            await self._link_files(order, data.get("attachments") or [])
             orders.append(order)
         request_ids = data.get("request_ids") or []
         if request_ids and orders:
@@ -174,9 +178,13 @@ class PurchaseFlowService:
         await self.session.flush()
         for order in orders:
             if order.status == "delivered":
+                await self._require_receipt_proof(order)
                 await self._apply_receipt(order, actor)
                 order.stock_received = True
                 self.session.add(order)
+                await self._notify_purchase(order, actor, arriving=False)
+            if order.status == "in_delivery":
+                await self._notify_purchase(order, actor, arriving=True)
         await commit_or_conflict(self.session)
         return {"orders": await self._read_many(orders, show_prices=True, staff_view=False)}
 
@@ -199,6 +207,10 @@ class PurchaseFlowService:
             await self._replace_lines(order, changes["lines"])
         if "notes" in changes:
             order.notes = changes["notes"]
+        if "challan_number" in changes:
+            order.challan_number = (changes["challan_number"] or "").strip() or None
+        if "challan_note" in changes:
+            order.challan_note = changes["challan_note"]
         if "expected_vehicle_plate" in changes:
             plate = changes["expected_vehicle_plate"]
             order.expected_vehicle_plate = plate.strip().upper() if isinstance(plate, str) and plate.strip() else None
@@ -216,8 +228,12 @@ class PurchaseFlowService:
             if order.stock_received and status != order.status:
                 raise HTTPException(status_code=409, detail="Stock was already added for this order")
             if status == "delivered" and not order.stock_received:
+                await self._require_receipt_proof(order)
                 await self._apply_receipt(order, actor)
                 order.stock_received = True
+                await self._notify_purchase(order, actor, arriving=False)
+            if status == "in_delivery" and order.status != "in_delivery":
+                await self._notify_purchase(order, actor, arriving=True)
             order.status = status
         self.session.add(order)
         await commit_or_conflict(self.session)
@@ -258,6 +274,83 @@ class PurchaseFlowService:
         self.session.add(order)
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices=True, staff_view=False)
+
+    async def add_attachment(self, order_id: UUID, payload: dict) -> dict:
+        from app.api.routes.attachment.attachment_model import Attachment
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrder, PurchaseOrderAttachment
+
+        order = await get_or_404(self.session, PurchaseOrder, order_id)
+        kind = str(payload.get("kind") or "")
+        if kind not in SLIP_KINDS:
+            raise HTTPException(status_code=400, detail="Slip kind must be a dispatch slip, received slip, or cargo photo")
+        stored = await self.session.get(Attachment, payload.get("attachment_id"))
+        if stored is None:
+            raise HTTPException(status_code=400, detail="That file was not uploaded")
+        link = PurchaseOrderAttachment(purchase_order_id=order.id, attachment_id=stored.id, kind=kind)
+        self.session.add(link)
+        await commit_or_conflict(self.session)
+        return await self._read(order, show_prices=True, staff_view=False)
+
+    async def remove_attachment(self, order_id: UUID, link_id: UUID) -> dict:
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrder, PurchaseOrderAttachment
+
+        order = await get_or_404(self.session, PurchaseOrder, order_id)
+        if order.stock_received:
+            raise HTTPException(status_code=409, detail="Stock was already added for this order")
+        link = await get_or_404(self.session, PurchaseOrderAttachment, link_id)
+        if link.purchase_order_id != order.id:
+            raise HTTPException(status_code=404, detail="That file is not on this order")
+        await self.session.delete(link)
+        await commit_or_conflict(self.session)
+        return await self._read(order, show_prices=True, staff_view=False)
+
+    async def _link_files(self, order, attachments: list) -> None:
+        from app.api.routes.attachment.attachment_model import Attachment
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrderAttachment
+
+        for item in attachments:
+            kind = str(item.get("kind") or "")
+            if kind not in SLIP_KINDS:
+                raise HTTPException(status_code=400, detail="Slip kind must be a dispatch slip, received slip, or cargo photo")
+            stored = await self.session.get(Attachment, item.get("attachment_id"))
+            if stored is None:
+                raise HTTPException(status_code=400, detail="That file was not uploaded")
+            self.session.add(
+                PurchaseOrderAttachment(purchase_order_id=order.id, attachment_id=stored.id, kind=kind)
+            )
+
+    async def _require_receipt_proof(self, order) -> None:
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrderAttachment
+
+        rows = list(
+            await self.session.scalars(
+                select(PurchaseOrderAttachment).where(PurchaseOrderAttachment.purchase_order_id == order.id)
+            )
+        )
+        kinds = {row.kind for row in rows}
+        if "received_slip" not in kinds or "cargo_photo" not in kinds:
+            raise HTTPException(
+                status_code=400,
+                detail="Upload the received slip and a photo of the unloaded cargo before stocking",
+            )
+
+    async def _notify_purchase(self, order, actor, *, arriving: bool) -> None:
+        from app.api.routes.notification.notification_services import notify, user_ids_with
+        from app.api.routes.supplier.supplier_model import Supplier
+        from app.api.security.permissions import MANAGE_PURCHASING
+
+        targets = await user_ids_with(self.session, MANAGE_PURCHASING, exclude=actor.id)
+        supplier = await self.session.get(Supplier, order.supplier_id)
+        company = supplier.supplier_company_name if supplier else "A supplier"
+        await notify(
+            self.session,
+            targets,
+            title=f"{company} is on the way" if arriving else f"{company} stock was received",
+            body="A purchase is in delivery." if arriving else "The received slip was checked and stock was credited.",
+            kind="purchase_incoming" if arriving else "purchase_received",
+            link="/purchases",
+            email=False,
+        )
 
     async def _add_line(self, order, supplier, line) -> None:
         from decimal import Decimal
@@ -386,7 +479,33 @@ class PurchaseFlowService:
 
         if not orders:
             return []
+        from app.api.routes.attachment.attachment_model import Attachment
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrderAttachment
+
         order_ids = [order.id for order in orders]
+        links = list(
+            await self.session.scalars(
+                select(PurchaseOrderAttachment).where(PurchaseOrderAttachment.purchase_order_id.in_(order_ids))  # type: ignore[attr-defined]
+            )
+        )
+        stored = {
+            row.id: row
+            for row in await self.session.scalars(
+                select(Attachment).where(Attachment.id.in_({link.attachment_id for link in links}))  # type: ignore[attr-defined]
+            )
+        } if links else {}
+        files: dict = {order.id: [] for order in orders}
+        for link in links:
+            file = stored.get(link.attachment_id)
+            files[link.purchase_order_id].append(
+                {
+                    "id": link.id,
+                    "attachment_id": link.attachment_id,
+                    "kind": link.kind,
+                    "filename": file.filename if file else "file",
+                    "content_type": file.content_type if file else "application/octet-stream",
+                }
+            )
         lines = list(
             await self.session.scalars(
                 select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id.in_(order_ids))  # type: ignore[attr-defined]
@@ -404,17 +523,19 @@ class PurchaseFlowService:
             for row in await self.session.scalars(select(RawMaterial).where(RawMaterial.id.in_(material_ids)))  # type: ignore[attr-defined]
         } if material_ids else {}
         products = {
-            row.id: row.product_name
+            row.id: (row.product_name, row.product_type)
             for row in await self.session.scalars(select(Product).where(Product.id.in_(product_ids)))  # type: ignore[attr-defined]
         } if product_ids else {}
         grouped: dict = {order.id: [] for order in orders}
         for line in lines:
-            item_name = materials.get(line.raw_material_id) if line.raw_material_id else products.get(line.product_id)
+            product = products.get(line.product_id) if line.product_id else None
+            item_name = materials.get(line.raw_material_id) if line.raw_material_id else (product[0] if product else None)
             grouped[line.purchase_order_id].append(
                 {
                     "id": line.id,
                     "product_id": line.product_id,
                     "raw_material_id": line.raw_material_id,
+                    "product_type": product[1] if product else None,
                     "item_name": item_name,
                     "quantity": line.quantity,
                     "unit_price": line.unit_price if show_prices and not staff_view else None,
@@ -429,12 +550,15 @@ class PurchaseFlowService:
                     "supplier_id": None if staff_view else order.supplier_id,
                     "supplier_name": None if staff_view else (supplier.supplier_company_name if supplier else None),
                     "notes": order.notes,
+                    "challan_number": order.challan_number,
+                    "challan_note": order.challan_note,
                     "status": order.status,
                     "stock_received": order.stock_received,
                     "expected_vehicle_plate": order.expected_vehicle_plate,
                     "arrived_vehicle_plate": order.arrived_vehicle_plate,
                     "plate_mismatch_note": order.plate_mismatch_note,
                     "receipt_attachment_id": order.receipt_attachment_id,
+                    "attachments": files.get(order.id, []),
                     "lines": grouped.get(order.id, []),
                 }
             )

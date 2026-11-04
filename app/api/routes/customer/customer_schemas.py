@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class CustomerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
+    contact_person_name: str | None = Field(default=None, max_length=150)
     is_company: bool = False
     gst_number: str | None = Field(default=None, max_length=20)
     address: str = Field(min_length=1)
@@ -19,6 +20,7 @@ class CustomerCreate(BaseModel):
 
 class CustomerUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
+    contact_person_name: str | None = Field(default=None, max_length=150)
     is_company: bool | None = None
     gst_number: str | None = Field(default=None, max_length=20)
     address: str | None = Field(default=None, min_length=1)
@@ -36,6 +38,7 @@ class CustomerRead(BaseModel):
 
     id: UUID
     name: str
+    contact_person_name: str | None = None
     is_company: bool
     gst_number: str | None
     address: str

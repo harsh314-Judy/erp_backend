@@ -1,6 +1,7 @@
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
+from fastapi.responses import Response
 
 from app.api.db_dependency import PGSessionDep
 from app.api.dependencies import CurrentUserDep, ReportServiceDep
@@ -25,6 +26,24 @@ async def dashboard(
     service: ReportServiceDep, user: CurrentUserDep
 ) -> DashboardRead:
     return await service.dashboard(user)
+
+
+@router.get("/reports/ca-export")
+async def ca_export(
+    service: ReportServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+    month: str = Query(..., pattern=r"^\d{4}-\d{2}$"),
+) -> Response:
+    role = await session.get(Role, user.role_id)
+    if not role_has(role.role_name if role else "", VIEW_FINANCIALS):
+        forbid()
+    payload, filename = await service.ca_csv(month)
+    return Response(
+        content=payload,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/reports/sales", response_model=SalesReport, response_model_exclude_none=True)

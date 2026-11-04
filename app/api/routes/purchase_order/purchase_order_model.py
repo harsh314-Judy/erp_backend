@@ -65,6 +65,8 @@ class PurchaseOrder(Entity, table=True):
         default=None, foreign_key="users.id", nullable=True, ondelete="SET NULL"
     )
     stock_received: bool = Field(default=False, nullable=False)
+    challan_number: str | None = Field(default=None, max_length=80, nullable=True)
+    challan_note: str | None = Field(default=None, sa_type=Text, nullable=True)
 
 
 class PurchaseOrderLine(Entity, table=True):
@@ -85,6 +87,18 @@ class PurchaseOrderLine(Entity, table=True):
     )
     quantity: Decimal = Field(sa_type=Numeric(14, 3), nullable=False)
     unit_price: Decimal = Field(sa_type=Numeric(12, 2), nullable=False)
+
+
+class PurchaseOrderAttachment(Entity, table=True):
+    __tablename__ = "purchase_order_attachments"
+
+    purchase_order_id: UUID = Field(
+        foreign_key="purchase_orders.id", nullable=False, index=True, ondelete="CASCADE"
+    )
+    attachment_id: UUID = Field(
+        foreign_key="attachments.id", nullable=False, index=True, ondelete="CASCADE"
+    )
+    kind: str = Field(max_length=24, nullable=False)
 
 
 class PurchaseRequest(Entity, table=True):
