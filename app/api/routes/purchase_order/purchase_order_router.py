@@ -155,6 +155,32 @@ async def list_purchase_requests(
     return await service.list_requests()
 
 
+@router.post("/purchase-orders/{order_id}/attachments")
+async def add_purchase_attachment(
+    order_id: UUID,
+    data: dict,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    await _purchase_role(session, user)
+    return await service.add_attachment(order_id, data)
+
+
+@router.delete("/purchase-orders/{order_id}/attachments/{link_id}")
+async def remove_purchase_attachment(
+    order_id: UUID,
+    link_id: UUID,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.remove_attachment(order_id, link_id)
+
+
 @router.post("/purchase-orders", status_code=status.HTTP_201_CREATED)
 async def create_purchase_order(
     data: dict,

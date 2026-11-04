@@ -11,6 +11,8 @@ class SupplierCreate(BaseModel):
     is_gst: bool = False
     gst_number: str | None = Field(default=None, max_length=20)
     address: str = Field(min_length=1)
+    state: str = ""
+    payment_terms: str | None = Field(default=None, max_length=120)
     alt_number: str | None = Field(default=None, max_length=20)
     supply_kind: str = "both"
     raw_material_ids: list[UUID] = []
@@ -25,6 +27,8 @@ class SupplierUpdate(BaseModel):
     is_gst: bool | None = None
     gst_number: str | None = Field(default=None, max_length=20)
     address: str | None = Field(default=None, min_length=1)
+    state: str | None = None
+    payment_terms: str | None = Field(default=None, max_length=120)
     alt_number: str | None = Field(default=None, max_length=20)
     supply_kind: str | None = None
     raw_material_ids: list[UUID] | None = None
@@ -42,6 +46,8 @@ class SupplierRead(BaseModel):
     is_gst: bool
     gst_number: str | None
     address: str
+    state: str = ""
+    payment_terms: str | None = None
     alt_number: str | None
     supply_kind: str = "both"
     raw_material_ids: list[UUID] = []

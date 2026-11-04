@@ -24,6 +24,7 @@ class RawMaterialCreate(BaseModel):
     purchase_price: Decimal = Field(default=Decimal("0"), ge=0)
     description: str | None = None
     kind: str = "sheet"
+    stock_group: str = "core"
     responsible_user_id: UUID | None = None
     category_id: UUID
     supplier_id: UUID | None = None
@@ -38,6 +39,7 @@ class RawMaterialUpdate(BaseModel):
     purchase_price: Decimal | None = Field(default=None, ge=0)
     description: str | None = None
     kind: str | None = None
+    stock_group: str | None = None
     responsible_user_id: UUID | None = None
     category_id: UUID | None = None
     supplier_id: UUID | None = None
@@ -55,6 +57,7 @@ class RawMaterialRead(BaseModel):
     purchase_price: Decimal | None = None
     description: str | None = None
     kind: str = "sheet"
+    stock_group: str = "core"
     responsible_user_id: UUID | None = None
     category_id: UUID | None = None
     supplier_id: UUID | None = None
@@ -68,3 +71,4 @@ class RawMaterialOption(BaseModel):
     id: UUID
     name: str
     kind: str
+    stock_group: str = "core"

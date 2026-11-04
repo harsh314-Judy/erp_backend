@@ -16,6 +16,8 @@ class Supplier(Entity, table=True):
     is_gst: bool = Field(default=False, nullable=False)
     gst_number: str | None = Field(default=None, max_length=20, nullable=True)
     address: str = Field(sa_type=Text, nullable=False)
+    state: str = Field(default="", max_length=80, nullable=False)
+    payment_terms: str | None = Field(default=None, max_length=120, nullable=True)
     alt_number: str | None = Field(default=None, max_length=20, nullable=True)
     supply_kind: str = Field(default="both", max_length=16, nullable=False)
 

@@ -13,6 +13,22 @@ from app.utility.email import send_email
 logger = logging.getLogger(__name__)
 
 
+async def user_ids_with(
+    session: AsyncSession, capability: str, exclude: UUID | None = None
+) -> list[UUID]:
+    from app.api.routes.user.user_model import Role
+    from app.api.security.permissions import role_has
+
+    rows = await session.execute(select(User.id, Role.role_name).join(Role, Role.id == User.role_id))
+    found: list[UUID] = []
+    for user_id, role_name in rows:
+        if exclude is not None and user_id == exclude:
+            continue
+        if role_has(role_name, capability):
+            found.append(user_id)
+    return found
+
+
 async def notify(
     session: AsyncSession,
     user_ids: list[UUID],
@@ -21,6 +37,7 @@ async def notify(
     body: str,
     kind: str,
     link: str | None = None,
+    email: bool = True,
 ) -> None:
     unique_ids = list(dict.fromkeys(user_ids))
     if not unique_ids:
@@ -30,7 +47,7 @@ async def notify(
             Notification(user_id=user_id, title=title, body=body, kind=kind, link=link)
         )
     await session.flush()
-    if not email_settings.is_configured:
+    if not email or not email_settings.is_configured:
         return
     result = await session.scalars(select(User).where(User.id.in_(unique_ids)))  # type: ignore[attr-defined]
     recipients = [user.email for user in result if user.email]

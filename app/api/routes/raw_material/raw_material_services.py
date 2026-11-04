@@ -28,6 +28,7 @@ from app.db.repository import (
 )
 
 _KINDS = {"sheet", "polish", "color", "other"}
+_GROUPS = {"core", "other"}
 
 
 class RawMaterialService:
@@ -96,6 +97,7 @@ class RawMaterialService:
 
     async def create_material(self, data: RawMaterialCreate, *, show_prices: bool) -> RawMaterialRead:
         self._kind(data.kind)
+        self._group(data.stock_group)
         await get_or_404(self.session, RawMaterialCategory, data.category_id)
         if data.supplier_id is not None:
             await self._assert_material_supplier(data.supplier_id)
@@ -114,6 +116,8 @@ class RawMaterialService:
         row = await get_or_404(self.session, RawMaterial, material_id)
         if data.kind is not None:
             self._kind(data.kind)
+        if data.stock_group is not None:
+            self._group(data.stock_group)
         changes = data.model_dump(exclude_unset=True)
         if changes.get("category_id") is not None:
             await get_or_404(self.session, RawMaterialCategory, changes["category_id"])
@@ -194,3 +198,8 @@ class RawMaterialService:
     def _kind(value: str) -> None:
         if value not in _KINDS:
             raise HTTPException(status_code=400, detail="Kind must be sheet, polish, color, or other")
+
+    @staticmethod
+    def _group(value: str) -> None:
+        if value not in _GROUPS:
+            raise HTTPException(status_code=400, detail="Stock group must be core or other")

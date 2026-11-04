@@ -73,15 +73,20 @@ class SalesOrderService:
                       o.packaging_user_id,
                       nullif(btrim(concat(u.first_name, ' ', coalesce(u.last_name, ''))), '') AS packaging_name,
                       o.delivery_charge,
+                      o.dispatch_by,
+                      o.turnaround_days,
+                      o.gst_billing,
                       coalesce((
                         SELECT json_agg(json_build_object(
                           'id', l.id,
                           'product_id', l.product_id,
                           'product_name', p.product_name,
+                          'product_type', p.product_type,
                           'quantity', l.quantity::text,
                           'held_quantity', l.held_quantity::text,
                           'unit_price', l.unit_price::text,
-                          'shortfall_choice', l.shortfall_choice
+                          'shortfall_choice', l.shortfall_choice,
+                          'source_purchase_order_id', l.source_purchase_order_id
                         ) ORDER BY l.created_at)
                         FROM sales_order_lines l
                         LEFT JOIN products p ON p.id = l.product_id
@@ -114,15 +119,20 @@ class SalesOrderService:
                     packaging_user_id=row["packaging_user_id"],
                     packaging_name=row["packaging_name"],
                     delivery_charge=row["delivery_charge"] if show_prices else 0,
+                    dispatch_by=row["dispatch_by"],
+                    turnaround_days=row["turnaround_days"],
+                    gst_billing=row["gst_billing"],
                     lines=[
                         SalesOrderLineRead(
                             id=line["id"],
                             product_id=line["product_id"],
                             product_name=line["product_name"],
+                            product_type=line.get("product_type"),
                             quantity=line["quantity"],
                             held_quantity=line["held_quantity"],
                             unit_price=line["unit_price"] if show_prices else None,
                             shortfall_choice=line["shortfall_choice"],
+                            source_purchase_order_id=line.get("source_purchase_order_id"),
                         )
                         for line in lines or []
                     ],
@@ -191,6 +201,9 @@ class SalesOrderService:
             packaging_user_id=packaging_user_id,
             created_by_user_id=actor.id,
             delivery_charge=company.delivery_charge,
+            dispatch_by=data.dispatch_by,
+            turnaround_days=data.turnaround_days,
+            gst_billing=data.gst_billing,
         )
         self.session.add(order)
         await self.session.flush()
@@ -211,6 +224,7 @@ class SalesOrderService:
                 held_quantity=held,
                 unit_price=product.sale_price_without_gst,
                 shortfall_choice=item.shortfall_choice,
+                source_purchase_order_id=item.source_purchase_order_id,
             )
             self.session.add(line)
             await self.session.flush()
@@ -237,6 +251,7 @@ class SalesOrderService:
                             notes=f"Shortfall for sales order {order.id}",
                             source="sales_shortfall",
                             source_id=order.id,
+                            deadline=order.dispatch_by,
                         ),
                         actor,
                         commit=False,
@@ -281,7 +296,7 @@ class SalesOrderService:
         return await self._read(order, show_prices)
 
     async def set_status(
-        self, order_id: UUID, status: str, actor: User, *, show_prices: bool
+        self, order_id: UUID, status: str, actor: User, *, show_prices: bool, sources: list | None = None
     ) -> SalesOrderRead:
         from app.api.routes.sales.sales_model import SalesOrder
 
@@ -302,7 +317,9 @@ class SalesOrderService:
         if target == "cancelled":
             await self._release_holds(order)
         elif target == "delivered":
+            await self._apply_sources(order, sources or [])
             await self._consume_holds(order, actor)
+            await self._notify_dispatched(order, actor)
         order.status = target
         self.session.add(order)
         await commit_or_conflict(self.session)
@@ -325,6 +342,36 @@ class SalesOrderService:
             if line.reservation_id is not None:
                 await inventory.release(line.reservation_id)
 
+    async def _apply_sources(self, order, sources: list) -> None:
+        from app.api.routes.product.product_model import Product
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrder, PurchaseOrderLine
+        from app.api.routes.sales.sales_model import SalesOrderLine
+
+        chosen = {item.line_id: item.source_purchase_order_id for item in sources}
+        lines = list(
+            await self.session.scalars(select(SalesOrderLine).where(SalesOrderLine.sales_order_id == order.id))
+        )
+        for line in lines:
+            product = await self.session.get(Product, line.product_id)
+            if product is None or product.product_type != "purchased":
+                continue
+            source_id = chosen.get(line.id) or line.source_purchase_order_id
+            if source_id is None:
+                raise HTTPException(status_code=400, detail="Choose the purchase this traded item came from")
+            purchase = await self.session.get(PurchaseOrder, source_id)
+            if purchase is None or not purchase.stock_received:
+                raise HTTPException(status_code=400, detail="Choose a received purchase order")
+            match = await self.session.scalar(
+                select(PurchaseOrderLine).where(
+                    PurchaseOrderLine.purchase_order_id == purchase.id,
+                    PurchaseOrderLine.product_id == line.product_id,
+                )
+            )
+            if match is None:
+                raise HTTPException(status_code=400, detail="That purchase does not include this product")
+            line.source_purchase_order_id = purchase.id
+            self.session.add(line)
+
     async def _consume_holds(self, order, actor: User) -> None:
         from app.api.routes.inventory.inventory_services import InventoryService
         from app.api.routes.sales.sales_model import SalesOrderLine
@@ -346,6 +393,24 @@ class SalesOrderService:
                 source_id=order.id,
                 note="Dispatched",
             )
+
+    async def _notify_dispatched(self, order, actor: User) -> None:
+        from app.api.routes.customer.customer_model import Customer
+        from app.api.routes.notification.notification_services import notify, user_ids_with
+        from app.api.security.permissions import MANAGE_SALES
+
+        targets = await user_ids_with(self.session, MANAGE_SALES, exclude=actor.id)
+        customer = await self.session.get(Customer, order.customer_id)
+        name = customer.name if customer else "A customer"
+        await notify(
+            self.session,
+            targets,
+            title=f"{name} order was dispatched",
+            body="The order left the plant.",
+            kind="sales_dispatched",
+            link="/sales",
+            email=False,
+        )
 
     async def _read(self, order, show_prices: bool) -> SalesOrderRead:
         from app.api.routes.customer.customer_model import Customer
@@ -377,10 +442,12 @@ class SalesOrderService:
                     id=line.id,
                     product_id=line.product_id,
                     product_name=product.product_name if product else None,
+                    product_type=product.product_type if product else None,
                     quantity=line.quantity,
                     held_quantity=line.held_quantity,
                     unit_price=line.unit_price if show_prices else None,
                     shortfall_choice=line.shortfall_choice,
+                    source_purchase_order_id=line.source_purchase_order_id,
                 )
             )
         return SalesOrderRead(
@@ -392,6 +459,9 @@ class SalesOrderService:
             packaging_user_id=order.packaging_user_id,
             packaging_name=packaging_name or None,
             delivery_charge=order.delivery_charge if show_prices else 0,
+            dispatch_by=order.dispatch_by,
+            turnaround_days=order.turnaround_days,
+            gst_billing=order.gst_billing,
             lines=rendered,
             invoice_id=invoice.id if invoice else None,
             invoice_has_pdf=bool(invoice and invoice.pdf_attachment_id),

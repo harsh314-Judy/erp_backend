@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import select
@@ -234,9 +235,12 @@ class ProductionService:
         operation = await get_or_404(self.session, Operation, stage.operation_id)
         if operation.name == "polishing" and data.polish_type not in {"dry", "wet"}:
             raise HTTPException(status_code=400, detail="Polishing needs a dry or wet finish")
+        worker = await self._resolve_worker(stage.operation_id, data)
         stage.status = "done"
         stage.polish_type = data.polish_type
         stage.notes = data.notes
+        stage.worker_id = worker.id
+        stage.worker_name = worker.name
         stage.completed_at = _now()
         self.session.add(stage)
         stages = await self._stages(job.id)
@@ -268,10 +272,10 @@ class ProductionService:
         if upcoming is not None:
             nxt = await self.session.get(Operation, upcoming.operation_id)
             moved = nxt.name if nxt else "the next stage"
-        detail = f"Finished {operation.name}{mode} → {moved}"
+        detail = f"Finished {operation.name}{mode} → {moved} · by {worker.name}"
         if data.notes and data.notes.strip():
             detail = f"{detail}. {data.notes.strip()}"
-        self._append_event(job, actor, "advanced", operation.name, detail)
+        self._append_event(job, actor, "advanced", operation.name, detail, worker.name)
         self.session.add(job)
         await commit_or_conflict(self.session)
         return await self._detail(job)
@@ -295,6 +299,9 @@ class ProductionService:
         previous.status = "active"
         previous.completed_at = None
         previous.polish_type = None
+        previous.notes = None
+        previous.worker_id = None
+        previous.worker_name = None
         previous.started_at = _now()
         self.session.add(previous)
         job.status = next_status(job.status, "revert")
@@ -383,6 +390,7 @@ class ProductionService:
         job.produced_quantity = qty(data.produced_quantity)
         job.completed_at = _now()
         self.session.add(job)
+        await self._notify_job_closed(job, actor, finished=True)
         await commit_or_conflict(self.session)
         return await self._detail(job)
 
@@ -410,6 +418,7 @@ class ProductionService:
         job.produced_quantity = qty(data.produced_quantity)
         job.completed_at = _now()
         self.session.add(job)
+        await self._notify_job_closed(job, actor, finished=False)
         await commit_or_conflict(self.session)
         return await self._detail(job)
 
@@ -543,6 +552,55 @@ class ProductionService:
         )
         return list(result)
 
+    async def _resolve_worker(self, operation_id: UUID, data: StageComplete):
+        from app.api.routes.department.department_model import DepartmentWorker
+
+        if data.worker_id is not None:
+            worker = await self.session.get(DepartmentWorker, data.worker_id)
+            if worker is None or worker.operation_id != operation_id:
+                raise HTTPException(status_code=400, detail="Choose a person from this department")
+            if not worker.active:
+                worker.active = True
+                self.session.add(worker)
+            return worker
+        name = (data.worker_name or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Choose who did this stage")
+        existing = await self.session.scalar(
+            select(DepartmentWorker).where(
+                DepartmentWorker.operation_id == operation_id,
+                func.lower(DepartmentWorker.name) == name.lower(),
+            )
+        )
+        if existing is not None:
+            existing.active = True
+            existing.name = name[:120]
+            self.session.add(existing)
+            return existing
+        worker = DepartmentWorker(operation_id=operation_id, name=name[:120], active=True)
+        self.session.add(worker)
+        await self.session.flush()
+        return worker
+
+    async def _notify_job_closed(self, job: ProductionJob, actor: User, *, finished: bool) -> None:
+        from app.api.routes.notification.notification_services import user_ids_with
+        from app.api.security.permissions import APPROVE_JOBS
+
+        targets = await user_ids_with(self.session, APPROVE_JOBS, exclude=actor.id)
+        if job.created_by_user_id and job.created_by_user_id != actor.id and job.created_by_user_id not in targets:
+            targets.append(job.created_by_user_id)
+        product = await self.session.get(Product, job.product_id)
+        label = product.product_name if product else "A job"
+        await notify(
+            self.session,
+            targets,
+            title=f"{label} is finished" if finished else f"{label} was cancelled",
+            body=f"Produced {job.produced_quantity}." if finished else (job.cancellation_reason or "The job was cancelled."),
+            kind="job_completed" if finished else "job_cancelled",
+            link="/production",
+            email=False,
+        )
+
     async def _notify_approvers(self, job: ProductionJob) -> None:
         result = await self.session.scalars(select(User))
         approvers: list[UUID] = []
@@ -585,7 +643,8 @@ class ProductionService:
             person = await self.session.get(User, job.created_by_user_id)
             if person is not None:
                 creator = _person(person)
-        assignee_id = await self._assignee_id(job.id)
+        stages = await self._stages(job.id)
+        assignee_id = self._assignee_from(stages)
         assignee = None
         if assignee_id is not None:
             person = await self.session.get(User, assignee_id)
@@ -610,10 +669,15 @@ class ProductionService:
             created_by_name=creator,
             assigned_user_id=assignee_id,
             assigned_user_name=assignee,
+            stages_done=sum(1 for stage in stages if stage.status == "done"),
+            stages_total=len(stages),
         )
 
     async def _assignee_id(self, job_id: UUID) -> UUID | None:
-        stages = await self._stages(job_id)
+        return self._assignee_from(await self._stages(job_id))
+
+    @staticmethod
+    def _assignee_from(stages: list[ProductionJobStage]) -> UUID | None:
         active = next((stage for stage in stages if stage.status == "active" and stage.assigned_user_id), None)
         if active is not None:
             return active.assigned_user_id
@@ -710,6 +774,7 @@ class ProductionService:
         action: str,
         stage: str | None,
         detail: str,
+        worker: str | None = None,
     ) -> None:
         flow = dict(job.operation_flow or {})
         events = list(flow.get("log") or [])
@@ -720,6 +785,7 @@ class ProductionService:
                 "action": action,
                 "stage": stage,
                 "detail": detail,
+                "worker": worker,
             }
         )
         flow["log"] = events
@@ -745,6 +811,7 @@ class ProductionService:
                     action=str(item.get("action") or "note"),
                     stage=item.get("stage") if isinstance(item.get("stage"), str) else None,
                     detail=str(item.get("detail") or ""),
+                    worker=item.get("worker") if isinstance(item.get("worker"), str) else None,
                 )
             )
         events.reverse()

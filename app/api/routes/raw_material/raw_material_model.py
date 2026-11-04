@@ -29,6 +29,7 @@ class RawMaterial(Entity, table=True):
     purchase_price: Decimal = Field(default=Decimal("0"), sa_type=Numeric(12, 2), nullable=False)
     description: str | None = Field(default=None, sa_type=Text, nullable=True)
     kind: str = Field(default="sheet", max_length=32, nullable=False)
+    stock_group: str = Field(default="core", max_length=16, nullable=False)
     responsible_user_id: UUID | None = Field(
         default=None,
         foreign_key="users.id",

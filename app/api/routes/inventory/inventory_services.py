@@ -341,7 +341,7 @@ class InventoryService:
             title=f"{name} is below its minimum",
             body=f"On hand is {qty(item.quantity)}. Minimum is {qty(item.alert_quantity)}.",
             kind="low_stock",
-            link="/products" if isinstance(item, Product) else "/raw-materials",
+            link="/products" if isinstance(item, Product) else "/materials",
         )
 
 

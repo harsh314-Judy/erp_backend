@@ -83,6 +83,14 @@ class ProductionJobStage(Entity, table=True):
     status: str = Field(default="pending", max_length=32, nullable=False)
     polish_type: str | None = Field(default=None, max_length=16, nullable=True)
     notes: str | None = Field(default=None, sa_type=Text, nullable=True)
+    worker_id: UUID | None = Field(
+        default=None,
+        foreign_key="department_workers.id",
+        nullable=True,
+        index=True,
+        ondelete="SET NULL",
+    )
+    worker_name: str | None = Field(default=None, max_length=120, nullable=True)
     started_at: datetime | None = Field(
         default=None, sa_type=DateTime(timezone=True), nullable=True
     )

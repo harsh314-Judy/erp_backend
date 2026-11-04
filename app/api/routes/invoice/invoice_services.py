@@ -61,7 +61,7 @@ class InvoiceService:
         for line in lines:
             product = products[line.product_id]
             line_taxable = money(line.quantity * line.unit_price)
-            rate = product.gst_percent if product.gst else 0
+            rate = product.gst_percent if product.gst and order.gst_billing else 0
             line_cgst, line_sgst, line_igst = split_gst(rate, line_taxable, same_state=same_state)
             self.session.add(
                 InvoiceLine(
@@ -174,7 +174,7 @@ class InvoiceService:
                     unit=unit.name if unit else "Nos",
                     mrp=line.unit_price if line.unit_price > 0 else product.sale_price_without_gst,
                     catalog_price=product.sale_price_without_gst,
-                    gst_percent=Decimal(product.gst_percent if product.gst else 0),
+                    gst_percent=Decimal(product.gst_percent if product.gst and order.gst_billing else 0),
                 )
             )
         return InvoiceDraft(

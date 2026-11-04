@@ -28,6 +28,8 @@ class ProductionJobUpdate(BaseModel):
 class StageComplete(BaseModel):
     polish_type: str | None = None
     notes: str | None = None
+    worker_id: UUID | None = None
+    worker_name: str | None = Field(default=None, max_length=120)
 
 
 class StageRevert(BaseModel):
@@ -57,6 +59,7 @@ class JobEvent(BaseModel):
     action: str
     stage: str | None = None
     detail: str
+    worker: str | None = None
 
 
 class VarianceRead(BaseModel):
@@ -97,6 +100,8 @@ class StageRead(BaseModel):
     status: str
     polish_type: str | None
     notes: str | None
+    worker_id: UUID | None = None
+    worker_name: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
@@ -134,6 +139,8 @@ class ProductionJobRead(BaseModel):
     created_by_name: str | None = None
     assigned_user_id: UUID | None = None
     assigned_user_name: str | None = None
+    stages_done: int = 0
+    stages_total: int = 0
 
 
 class ProductionJobDetail(ProductionJobRead):

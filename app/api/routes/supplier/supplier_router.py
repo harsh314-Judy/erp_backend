@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.api.dependencies import SupplierServiceDep
 from app.api.routes.supplier.supplier_schemas import (
@@ -21,9 +21,11 @@ router = APIRouter(tags=["suppliers"])
 
 @router.get("/suppliers", response_model=PaginatedResponse[SupplierRead])
 async def list_suppliers(
-    service: SupplierServiceDep, pagination: PaginationDep
+    service: SupplierServiceDep,
+    pagination: PaginationDep,
+    q: str | None = Query(default=None),
 ) -> PaginatedResponse[SupplierRead]:
-    return await service.list_suppliers(pagination)
+    return await service.list_suppliers(pagination, q)
 
 
 @router.post("/suppliers", response_model=SupplierRead, status_code=status.HTTP_201_CREATED)

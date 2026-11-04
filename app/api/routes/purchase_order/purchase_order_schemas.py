@@ -64,6 +64,8 @@ class PurchaseOrderUpdate(BaseModel):
     notes: str | None = None
     expected_vehicle_plate: str | None = None
     supplier_id: UUID | None = None
+    challan_number: str | None = Field(default=None, max_length=80)
+    challan_note: str | None = None
     lines: list[PurchaseOrderLineWrite] | None = None
 
 
