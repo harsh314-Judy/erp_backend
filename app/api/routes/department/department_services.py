@@ -25,6 +25,7 @@ from app.api.routes.production.production_model import (
     ProductionJobStage,
 )
 from app.api.routes.raw_material.raw_material_model import RawMaterial
+from app.api.routes.user.user_model import User
 from app.db.repository import commit_or_conflict, get_or_404
 
 _ROUTE = ["cutting", "shaping", "assembly", "polishing", "coloring", "packaging"]
@@ -161,22 +162,34 @@ class DepartmentService:
                     inputs=inputs.get(job.id, []),
                 )
             )
+        assigned_ids = {
+            stage.assigned_user_id
+            for stage, _, _ in recent_rows
+            if stage.assigned_user_id is not None and not stage.worker_name
+        }
+        assigned_names: dict[UUID, str] = {}
+        if assigned_ids:
+            for person in await self.session.scalars(select(User).where(User.id.in_(assigned_ids))):  # type: ignore[attr-defined]
+                assigned_names[person.id] = " ".join(
+                    part for part in (person.first_name, person.last_name) if part
+                ).strip()
         counts: dict[UUID, dict[str, int]] = {}
         for stage, job, product_name in recent_rows:
             bucket = by_operation.get(stage.operation_id)
             if bucket is None:
                 continue
+            person = assigned_names.get(stage.assigned_user_id) if stage.assigned_user_id else None
+            label = stage.worker_name or person or "Unassigned"
             if len(bucket.recent) < 10:
                 bucket.recent.append(
                     DepartmentRecent(
-                        worker_name=stage.worker_name,
+                        worker_name=label,
                         product_name=product_name,
                         quantity=job.quantity,
                         completed_at=stage.completed_at,
                         polish_type=stage.polish_type,
                     )
                 )
-            label = stage.worker_name or "Unnamed"
             counts.setdefault(stage.operation_id, {})
             counts[stage.operation_id][label] = counts[stage.operation_id].get(label, 0) + 1
         for operation_id, names in counts.items():
