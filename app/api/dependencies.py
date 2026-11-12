@@ -9,6 +9,7 @@ from app.api.routes.user.user_model import Role, User
 from app.api.routes.auth.auth_services import AuthService
 from app.api.routes.customer.customer_services import CustomerService
 from app.api.routes.department.department_services import DepartmentService
+from app.api.routes.floor.floor_services import FloorService
 from app.api.routes.health.health_service import HealthService
 from app.api.routes.operation.operation_services import OperationService
 from app.api.routes.product.product_services import ProductService
@@ -137,6 +138,10 @@ def get_department_service(pg_session: PGSessionDep) -> DepartmentService:
     return DepartmentService(pg_session)
 
 
+def get_floor_service(pg_session: PGSessionDep) -> FloorService:
+    return FloorService(pg_session)
+
+
 def get_trading_service(pg_session: PGSessionDep) -> TradingService:
     return TradingService(pg_session)
 
@@ -172,4 +177,5 @@ type ReportServiceDep = Annotated[ReportService, Depends(get_report_service)]
 type PurchaseFlowServiceDep = Annotated[PurchaseFlowService, Depends(get_purchase_flow_service)]
 type AttachmentServiceDep = Annotated[AttachmentService, Depends(get_attachment_service)]
 type DepartmentServiceDep = Annotated[DepartmentService, Depends(get_department_service)]
+type FloorServiceDep = Annotated[FloorService, Depends(get_floor_service)]
 type TradingServiceDep = Annotated[TradingService, Depends(get_trading_service)]

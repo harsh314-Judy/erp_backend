@@ -6,6 +6,7 @@ def import_models() -> None:
     from app.api.routes.auth import auth_model as auth_model
     from app.api.routes.customer import customer_model as customer_model
     from app.api.routes.department import department_model as department_model
+    from app.api.routes.floor import floor_model as floor_model
     from app.api.routes.operation import operation_model as operation_model
     from app.api.routes.product import product_model as product_model
     from app.api.routes.production import production_model as production_model

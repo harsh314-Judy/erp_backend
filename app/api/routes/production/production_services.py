@@ -235,14 +235,37 @@ class ProductionService:
         operation = await get_or_404(self.session, Operation, stage.operation_id)
         if operation.name == "polishing" and data.polish_type not in {"dry", "wet"}:
             raise HTTPException(status_code=400, detail="Polishing needs a dry or wet finish")
-        worker = await self._resolve_worker(stage.operation_id, data)
+        workers = await self._resolve_workers(stage.operation_id, data)
+        made = qty(data.quantity) if data.quantity is not None else qty(job.quantity)
         stage.status = "done"
         stage.polish_type = data.polish_type
         stage.notes = data.notes
-        stage.worker_id = worker.id
-        stage.worker_name = worker.name
+        stage.worker_id = workers[0].id
+        stage.worker_name = ", ".join(worker.name for worker in workers)[:120]
         stage.completed_at = _now()
         self.session.add(stage)
+        product = await self.session.get(Product, job.product_id)
+        unit_name = "pcs"
+        if product is not None:
+            from app.api.routes.product.product_model import MeasurementUnit
+
+            unit = await self.session.get(MeasurementUnit, product.measurement_unit_id)
+            if unit is not None and unit.name:
+                unit_name = unit.name[:16]
+        from app.api.routes.floor.floor_services import FloorService
+
+        await FloorService(self.session).record_stage(
+            stage_id=stage.id,
+            job_id=job.id,
+            operation_id=stage.operation_id,
+            product_id=job.product_id,
+            output_name=product.product_name if product is not None else "Item",
+            output_quantity=made,
+            output_unit=unit_name,
+            scrap_quantity=qty(data.scrap_quantity),
+            workers=workers,
+            actor=actor,
+        )
         stages = await self._stages(job.id)
         upcoming = next((item for item in stages if item.status == "pending"), None)
         if upcoming is None:
@@ -272,10 +295,10 @@ class ProductionService:
         if upcoming is not None:
             nxt = await self.session.get(Operation, upcoming.operation_id)
             moved = nxt.name if nxt else "the next stage"
-        detail = f"Finished {operation.name}{mode} → {moved} · by {worker.name}"
+        detail = f"Finished {operation.name}{mode} → {moved} · by {stage.worker_name}"
         if data.notes and data.notes.strip():
             detail = f"{detail}. {data.notes.strip()}"
-        self._append_event(job, actor, "advanced", operation.name, detail, worker.name)
+        self._append_event(job, actor, "advanced", operation.name, detail, stage.worker_name)
         self.session.add(job)
         await commit_or_conflict(self.session)
         return await self._detail(job)
@@ -295,6 +318,9 @@ class ProductionService:
             active.started_at = None
             self.session.add(active)
         operation = await get_or_404(self.session, Operation, previous.operation_id)
+        from app.api.routes.floor.floor_services import FloorService
+
+        await FloorService(self.session).drop_stage(previous.id)
         was = previous.polish_type
         previous.status = "active"
         previous.completed_at = None
@@ -552,35 +578,48 @@ class ProductionService:
         )
         return list(result)
 
-    async def _resolve_worker(self, operation_id: UUID, data: StageComplete):
+    async def _resolve_workers(self, operation_id: UUID, data: StageComplete):
         from app.api.routes.department.department_model import DepartmentWorker
 
-        if data.worker_id is not None:
-            worker = await self.session.get(DepartmentWorker, data.worker_id)
-            if worker is None or worker.operation_id != operation_id:
-                raise HTTPException(status_code=400, detail="Choose a person from this department")
+        wanted = list(data.worker_ids)
+        if data.worker_id is not None and data.worker_id not in wanted:
+            wanted.insert(0, data.worker_id)
+        found = []
+        seen: set[UUID] = set()
+        for worker_id in wanted[:3]:
+            if worker_id in seen:
+                continue
+            seen.add(worker_id)
+            worker = await self.session.get(DepartmentWorker, worker_id)
+            if worker is None:
+                raise HTTPException(status_code=400, detail="Choose a person from the roster")
             if not worker.active:
                 worker.active = True
                 self.session.add(worker)
-            return worker
+            found.append(worker)
+        if found:
+            return found
         name = (data.worker_name or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="Choose who did this stage")
         existing = await self.session.scalar(
-            select(DepartmentWorker).where(
-                DepartmentWorker.operation_id == operation_id,
-                func.lower(DepartmentWorker.name) == name.lower(),
-            )
+            select(DepartmentWorker).where(func.lower(DepartmentWorker.name) == name.lower())
         )
         if existing is not None:
             existing.active = True
             existing.name = name[:120]
             self.session.add(existing)
-            return existing
+            return [existing]
         worker = DepartmentWorker(operation_id=operation_id, name=name[:120], active=True)
         self.session.add(worker)
         await self.session.flush()
-        return worker
+        from app.api.routes.department.department_model import WorkerDepartmentHistory
+        from app.api.routes.floor.floor_services import today_ist
+
+        self.session.add(
+            WorkerDepartmentHistory(worker_id=worker.id, operation_id=operation_id, started_on=today_ist())
+        )
+        return [worker]
 
     async def _notify_job_closed(self, job: ProductionJob, actor: User, *, finished: bool) -> None:
         from app.api.routes.notification.notification_services import user_ids_with
