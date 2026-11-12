@@ -56,6 +56,74 @@ def test_job_lifecycle() -> None:
         next_status("pending", "approve")
 
 
+def test_floor_totals_keep_units_and_shared_batches() -> None:
+    from app.api.routes.floor.floor_aggregate import (
+        FloorFact,
+        department_average,
+        department_rollup,
+        worker_rollup,
+    )
+
+    day = datetime(2026, 11, 12).date()
+    shared = FloorFact(
+        entry_id="1",
+        operation_id="assembly",
+        entry_date=day,
+        output_name="Thali",
+        output_unit="pcs",
+        output_quantity=Decimal("300"),
+        scrap_quantity=Decimal("0"),
+        scrap_unit=None,
+        input_quantity=None,
+        input_unit=None,
+        worker_ids=("raj", "amit"),
+    )
+    cut = FloorFact(
+        entry_id="2",
+        operation_id="cutting",
+        entry_date=day,
+        output_name="Sheet",
+        output_unit="kg",
+        output_quantity=Decimal("100"),
+        scrap_quantity=Decimal("2"),
+        scrap_unit="pcs",
+        input_quantity=Decimal("110"),
+        input_unit="kg",
+        worker_ids=("raj",),
+    )
+    department = department_rollup([shared])
+    assert department.output == {"pcs": Decimal("300")}
+    assert department.entries == 1
+    assert worker_rollup([shared], "raj").output["pcs"] == Decimal("300")
+    assert worker_rollup([shared], "amit").output["pcs"] == Decimal("300")
+    mixed = department_rollup([shared, cut])
+    assert mixed.output["pcs"] == Decimal("300")
+    assert mixed.output["kg"] == Decimal("100")
+    assert "410" not in {str(value) for value in mixed.output.values()}
+    assert mixed.scrap == {"pcs": Decimal("2")}
+    assert mixed.scrap_pct["kg"] is None
+    matched = department_rollup(
+        [
+            FloorFact(
+                entry_id="3",
+                operation_id="cutting",
+                entry_date=day,
+                output_name="Sheet",
+                output_unit="kg",
+                output_quantity=Decimal("100"),
+                scrap_quantity=Decimal("10"),
+                scrap_unit="kg",
+                input_quantity=None,
+                input_unit=None,
+                worker_ids=("raj",),
+            )
+        ]
+    )
+    assert matched.scrap_pct["kg"] == Decimal("10.00")
+    average = department_average([shared], "assembly")
+    assert average["pcs"] == Decimal("300.000")
+
+
 def test_gst_and_financial_year() -> None:
     cgst, sgst, igst = split_gst(18, "100", same_state=True)
     assert cgst == Decimal("9.00")

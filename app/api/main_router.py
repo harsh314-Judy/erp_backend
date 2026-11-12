@@ -4,6 +4,7 @@ from app.api.routes.attendance.attendance_router import router as attendance_rou
 from app.api.routes.auth.auth_router import router as auth_router
 from app.api.routes.customer.customer_router import router as customer_router
 from app.api.routes.department.department_router import router as department_router
+from app.api.routes.floor.floor_router import router as floor_router
 from app.api.routes.health import health_routes
 from app.api.routes.operation.operation_router import router as operation_router
 from app.api.routes.product.product_router import router as product_router
@@ -44,4 +45,5 @@ main_router.include_router(attachment_router)
 main_router.include_router(settings_router)
 main_router.include_router(report_router)
 main_router.include_router(department_router)
+main_router.include_router(floor_router)
 main_router.include_router(trading_router)

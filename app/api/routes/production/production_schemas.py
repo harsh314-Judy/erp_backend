@@ -30,6 +30,9 @@ class StageComplete(BaseModel):
     notes: str | None = None
     worker_id: UUID | None = None
     worker_name: str | None = Field(default=None, max_length=120)
+    worker_ids: list[UUID] = Field(default_factory=list, max_length=3)
+    quantity: Decimal | None = Field(default=None, ge=0)
+    scrap_quantity: Decimal = Field(default=Decimal("0"), ge=0)
 
 
 class StageRevert(BaseModel):
