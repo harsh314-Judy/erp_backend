@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import DateTime, Numeric, Text
+from sqlalchemy import Date, DateTime, Numeric, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field
 
@@ -97,6 +97,43 @@ class ProductionJobStage(Entity, table=True):
     completed_at: datetime | None = Field(
         default=None, sa_type=DateTime(timezone=True), nullable=True
     )
+    good_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
+    scrap_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
+    problem_reason: str | None = Field(default=None, max_length=64, nullable=True)
+    problem_note: str | None = Field(default=None, sa_type=Text, nullable=True)
+    problem_opened_at: datetime | None = Field(
+        default=None, sa_type=DateTime(timezone=True), nullable=True
+    )
+    first_piece_ok: bool | None = Field(default=None, nullable=True)
+    problem_machine_id: UUID | None = Field(
+        default=None,
+        foreign_key="machines.id",
+        nullable=True,
+        index=True,
+        ondelete="SET NULL",
+    )
+    allows_send_out: bool = Field(default=False, nullable=False)
+    standard_scrap_percent: Decimal | None = Field(default=None, sa_type=Numeric(6, 2), nullable=True)
+
+
+class StageSend(Entity, table=True):
+    """Pieces that left the plant from one stage. The row is the outside quantity."""
+
+    __tablename__ = "stage_sends"
+
+    stage_id: UUID = Field(
+        foreign_key="production_job_stages.id", nullable=False, index=True, ondelete="CASCADE"
+    )
+    job_id: UUID = Field(
+        foreign_key="production_jobs.id", nullable=False, index=True, ondelete="CASCADE"
+    )
+    supplier_id: UUID = Field(
+        foreign_key="suppliers.id", nullable=False, index=True, ondelete="RESTRICT"
+    )
+    quantity: Decimal = Field(sa_type=Numeric(14, 3), nullable=False)
+    sent_on: date = Field(sa_type=Date, nullable=False)
+    good_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
+    rejected_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
 
 
 class ProductionJobInput(Entity, table=True):
@@ -119,3 +156,4 @@ class ProductionJobInput(Entity, table=True):
     actual_quantity: Decimal | None = Field(default=None, sa_type=Numeric(14, 3), nullable=True)
     wastage_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
     reservation_id: UUID | None = Field(default=None, nullable=True)
+    taken_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)

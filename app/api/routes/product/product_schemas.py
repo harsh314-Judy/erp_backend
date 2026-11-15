@@ -53,8 +53,21 @@ class ComponentRead(ComponentWrite):
     item_name: str | None = None
 
 
+class RouteStepWrite(BaseModel):
+    operation_id: UUID
+    allows_send_out: bool = False
+    standard_scrap_percent: Decimal | None = Field(default=None, ge=0, le=100)
+
+
+class RouteStepRead(BaseModel):
+    operation_id: UUID
+    allows_send_out: bool = False
+    standard_scrap_percent: Decimal | None = None
+
+
 class RouteWrite(BaseModel):
-    operation_ids: list[UUID]
+    operation_ids: list[UUID] = Field(default_factory=list)
+    steps: list[RouteStepWrite] | None = None
 
 
 class ProductCreate(BaseModel):

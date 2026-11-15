@@ -51,3 +51,14 @@ class RawMaterial(Entity, table=True):
         index=True,
         ondelete="SET NULL",
     )
+    thickness: str | None = Field(default=None, max_length=32, nullable=True)
+    grade: str | None = Field(default=None, max_length=32, nullable=True)
+    size: str | None = Field(default=None, max_length=64, nullable=True)
+    parent_raw_material_id: UUID | None = Field(
+        default=None,
+        foreign_key="raw_materials.id",
+        nullable=True,
+        index=True,
+        ondelete="SET NULL",
+    )
+    is_remnant: bool = Field(default=False, nullable=False)

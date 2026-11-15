@@ -214,12 +214,8 @@ class FloorService:
         scrap_quantity: Decimal,
         workers: list[DepartmentWorker],
         actor: User,
+        notes: str | None = None,
     ) -> None:
-        existing = await self.session.scalar(select(FloorEntry).where(FloorEntry.stage_id == stage_id))
-        if existing is not None:
-            await self.session.execute(delete(FloorEntryWorker).where(FloorEntryWorker.entry_id == existing.id))
-            await self.session.delete(existing)
-            await self.session.flush()
         entry = FloorEntry(
             entry_date=today_ist(),
             operation_id=operation_id,
@@ -231,6 +227,7 @@ class FloorService:
             scrap_unit=(output_unit or "pcs")[:16] if scrap_quantity else None,
             job_id=job_id,
             stage_id=stage_id,
+            notes=(notes or None),
             created_by_user_id=actor.id,
         )
         self.session.add(entry)
@@ -238,11 +235,12 @@ class FloorService:
         self._attach(entry, workers)
 
     async def drop_stage(self, stage_id: UUID) -> None:
-        entry = await self.session.scalar(select(FloorEntry).where(FloorEntry.stage_id == stage_id))
-        if entry is None:
-            return
-        await self.session.execute(delete(FloorEntryWorker).where(FloorEntryWorker.entry_id == entry.id))
-        await self.session.delete(entry)
+        entries = list(
+            await self.session.scalars(select(FloorEntry).where(FloorEntry.stage_id == stage_id))
+        )
+        for entry in entries:
+            await self.session.execute(delete(FloorEntryWorker).where(FloorEntryWorker.entry_id == entry.id))
+            await self.session.delete(entry)
 
     async def timeline(
         self,

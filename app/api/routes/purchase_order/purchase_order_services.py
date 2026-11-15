@@ -231,11 +231,44 @@ class PurchaseFlowService:
                 await self._require_receipt_proof(order)
                 await self._apply_receipt(order, actor)
                 order.stock_received = True
+                order.receipt_fail_reason = None
+                order.receipt_fail_note = None
                 await self._notify_purchase(order, actor, arriving=False)
             if status == "in_delivery" and order.status != "in_delivery":
                 await self._notify_purchase(order, actor, arriving=True)
             order.status = status
         self.session.add(order)
+        await commit_or_conflict(self.session)
+        return await self._read(order, show_prices=True, staff_view=False)
+
+    async def inspect_receipt(self, order_id: UUID, data, actor: User) -> dict:
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrder
+
+        order = await get_or_404(self.session, PurchaseOrder, order_id)
+        if order.stock_received:
+            raise HTTPException(status_code=409, detail="Stock was already added for this order")
+        if order.status != "in_delivery":
+            raise HTTPException(status_code=409, detail="Inspect the truck while it is in delivery")
+        result = str(data.result or "").strip().lower()
+        if result == "fail":
+            reason = str(data.reason or "").strip().lower()
+            if reason not in {"wrong thickness", "rust", "short count", "other"}:
+                raise HTTPException(status_code=400, detail="Choose why the delivery failed")
+            order.receipt_fail_reason = reason
+            order.receipt_fail_note = (data.note or "").strip() or None
+            self.session.add(order)
+            await commit_or_conflict(self.session)
+            return await self._read(order, show_prices=True, staff_view=False)
+        if result != "pass":
+            raise HTTPException(status_code=400, detail="Pass or fail the delivery")
+        await self._require_receipt_proof(order)
+        await self._apply_receipt(order, actor)
+        order.stock_received = True
+        order.status = "delivered"
+        order.receipt_fail_reason = None
+        order.receipt_fail_note = None
+        self.session.add(order)
+        await self._notify_purchase(order, actor, arriving=False)
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices=True, staff_view=False)
 
@@ -554,6 +587,8 @@ class PurchaseFlowService:
                     "challan_note": order.challan_note,
                     "status": order.status,
                     "stock_received": order.stock_received,
+                    "receipt_fail_reason": order.receipt_fail_reason,
+                    "receipt_fail_note": order.receipt_fail_note,
                     "expected_vehicle_plate": order.expected_vehicle_plate,
                     "arrived_vehicle_plate": order.arrived_vehicle_plate,
                     "plate_mismatch_note": order.plate_mismatch_note,

@@ -69,6 +69,8 @@ class ProductRouteStep(Entity, table=True):
         foreign_key="operations.id", nullable=False, index=True, ondelete="RESTRICT"
     )
     position: int = Field(nullable=False)
+    allows_send_out: bool = Field(default=False, nullable=False)
+    standard_scrap_percent: Decimal | None = Field(default=None, sa_type=Numeric(6, 2), nullable=True)
 
 
 class ProductComponent(Entity, table=True):

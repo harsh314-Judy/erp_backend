@@ -16,6 +16,7 @@ def import_models() -> None:
     from app.api.routes.supplier import supplier_model as supplier_model
     from app.api.routes.attachment import attachment_model as attachment_model
     from app.api.routes.inventory import inventory_model as inventory_model
+    from app.api.routes.machine import machine_model as machine_model
     from app.api.routes.invoice import invoice_model as invoice_model
     from app.api.routes.notification import notification_model as notification_model
     from app.api.routes.settings import settings_model as settings_model

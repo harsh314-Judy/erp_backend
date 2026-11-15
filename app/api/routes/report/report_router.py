@@ -6,7 +6,7 @@ from fastapi.responses import Response
 from app.api.db_dependency import PGSessionDep
 from app.api.dependencies import CurrentUserDep, ReportServiceDep
 from app.api.routes.inventory.inventory_services import InventoryService, movement_visible
-from app.api.routes.report.report_schemas import DashboardRead, ProductionReport, SalesReport
+from app.api.routes.report.report_schemas import DashboardRead, ProductionReport, SalesReport, ShopReport
 from app.api.routes.user.user_model import Role
 from app.api.security.permissions import VIEW_FINANCIALS, VIEW_REPORTS, can_see_prices, forbid, role_has
 
@@ -44,6 +44,14 @@ async def ca_export(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/reports/shop", response_model=ShopReport, response_model_exclude_none=True)
+async def shop_report(
+    service: ReportServiceDep, session: PGSessionDep, user: CurrentUserDep
+) -> ShopReport:
+    await _role(session, user)
+    return await service.shop_report(user)
 
 
 @router.get("/reports/sales", response_model=SalesReport, response_model_exclude_none=True)

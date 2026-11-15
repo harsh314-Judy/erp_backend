@@ -88,6 +88,10 @@ class SalesOrderRead(BaseModel):
     invoice_id: UUID | None = None
     invoice_has_pdf: bool = False
     updated_at: datetime | None = None
+    job_due_at: datetime | None = None
+    blocked_material: bool = False
+    blocked_problem: bool = False
+    problem_reason: str | None = None
 
 
 class SalesSource(BaseModel):

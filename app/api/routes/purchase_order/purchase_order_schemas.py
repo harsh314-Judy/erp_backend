@@ -59,6 +59,12 @@ class PurchaseOrderLineWrite(BaseModel):
     unit_price: Decimal = Field(ge=0)
 
 
+class ReceiptInspect(BaseModel):
+    result: str
+    reason: str | None = None
+    note: str | None = None
+
+
 class PurchaseOrderUpdate(BaseModel):
     status: str | None = None
     notes: str | None = None

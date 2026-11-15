@@ -26,6 +26,9 @@ from app.api.routes.product.product_schemas import (
     ProductOption,
     ProductRead,
     ProductUpdate,
+    RouteStepRead,
+    RouteStepWrite,
+    RouteWrite,
 )
 from app.api.routes.raw_material.raw_material_model import RawMaterial
 from app.api.schemas.pagination import PaginatedResponse, PaginationParams
@@ -189,29 +192,51 @@ class ProductService:
     async def delete_product(self, product_id: UUID) -> None:
         await delete_model(self.session, Product, product_id)
 
-    async def replace_route(self, product_id: UUID, operation_ids: list[UUID]) -> list[UUID]:
+    async def replace_route(self, product_id: UUID, data: RouteWrite) -> list[RouteStepRead]:
         await get_or_404(self.session, Product, product_id)
+        steps = data.steps
+        if steps is None:
+            steps = [RouteStepWrite(operation_id=item) for item in data.operation_ids]
         existing = await self.session.scalars(
             select(ProductRouteStep).where(ProductRouteStep.product_id == product_id)
         )
         for row in list(existing):
             await self.session.delete(row)
-        for index, operation_id in enumerate(operation_ids):
+        saved: list[RouteStepRead] = []
+        for index, step in enumerate(steps):
             self.session.add(
                 ProductRouteStep(
-                    product_id=product_id, operation_id=operation_id, position=index
+                    product_id=product_id,
+                    operation_id=step.operation_id,
+                    position=index,
+                    allows_send_out=step.allows_send_out,
+                    standard_scrap_percent=step.standard_scrap_percent,
+                )
+            )
+            saved.append(
+                RouteStepRead(
+                    operation_id=step.operation_id,
+                    allows_send_out=step.allows_send_out,
+                    standard_scrap_percent=step.standard_scrap_percent,
                 )
             )
         await self.session.commit()
-        return operation_ids
+        return saved
 
-    async def list_route(self, product_id: UUID) -> list[UUID]:
+    async def list_route(self, product_id: UUID) -> list[RouteStepRead]:
         rows = await self.session.scalars(
             select(ProductRouteStep)
             .where(ProductRouteStep.product_id == product_id)
             .order_by(ProductRouteStep.position)
         )
-        return [row.operation_id for row in rows]
+        return [
+            RouteStepRead(
+                operation_id=row.operation_id,
+                allows_send_out=bool(row.allows_send_out),
+                standard_scrap_percent=row.standard_scrap_percent,
+            )
+            for row in rows
+        ]
 
     async def replace_recipe(
         self, product_id: UUID, items: list[ComponentWrite]

@@ -141,7 +141,56 @@ class SalesOrderService:
                     updated_at=row["updated_at"],
                 )
             )
-        return rendered
+        return await self._with_flags(rendered)
+
+    async def _with_flags(self, orders: list[SalesOrderRead]) -> list[SalesOrderRead]:
+        if not orders:
+            return orders
+        from app.api.routes.production.production_model import ProductionJob, ProductionJobStage
+
+        ids = [order.id for order in orders]
+        jobs = list(
+            await self.session.scalars(
+                select(ProductionJob).where(
+                    ProductionJob.source == "sales_shortfall",
+                    ProductionJob.source_id.in_(ids),  # type: ignore[attr-defined]
+                    ProductionJob.status.notin_(["cancelled", "completed"]),
+                )
+            )
+        )
+        problem_by_job: dict[UUID, str] = {}
+        if jobs:
+            stages = list(
+                await self.session.scalars(
+                    select(ProductionJobStage).where(
+                        ProductionJobStage.job_id.in_([job.id for job in jobs]),  # type: ignore[attr-defined]
+                        ProductionJobStage.problem_reason.is_not(None),
+                    )
+                )
+            )
+            problem_by_job = {stage.job_id: stage.problem_reason or "" for stage in stages}
+        flags: dict[UUID, dict] = {}
+        for job in jobs:
+            if job.source_id is None:
+                continue
+            slot = flags.setdefault(
+                job.source_id,
+                {
+                    "blocked_material": False,
+                    "blocked_problem": False,
+                    "problem_reason": None,
+                    "job_due_at": None,
+                },
+            )
+            if job.status == "pending":
+                slot["blocked_material"] = True
+            reason = problem_by_job.get(job.id)
+            if reason:
+                slot["blocked_problem"] = True
+                slot["problem_reason"] = reason
+            if job.due_at is not None and (slot["job_due_at"] is None or job.due_at < slot["job_due_at"]):
+                slot["job_due_at"] = job.due_at
+        return [order.model_copy(update=flags.get(order.id, {})) for order in orders]
 
     async def delete_dispatched(self) -> int:
         from sqlalchemy import delete
@@ -450,7 +499,7 @@ class SalesOrderService:
                     source_purchase_order_id=line.source_purchase_order_id,
                 )
             )
-        return SalesOrderRead(
+        built = SalesOrderRead(
             id=order.id,
             customer_id=order.customer_id,
             customer_name=customer.name if customer else None,
@@ -467,3 +516,4 @@ class SalesOrderService:
             invoice_has_pdf=bool(invoice and invoice.pdf_attachment_id),
             updated_at=order.updated_at,
         )
+        return (await self._with_flags([built]))[0]

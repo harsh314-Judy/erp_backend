@@ -178,6 +178,54 @@ class InventoryService:
         self.session.add(row)
         await self.session.flush()
 
+    async def take_held(
+        self,
+        reservation_id: UUID,
+        actual: Decimal,
+        *,
+        user_id: UUID | None,
+        source_type: str,
+        source_id: UUID,
+        note: str | None = None,
+        reason: str = "sheet_use",
+    ) -> None:
+        """Take part of a hold off the shelf and leave the rest held."""
+        result = await self.session.execute(
+            select(StockReservation).where(StockReservation.id == reservation_id).with_for_update()
+        )
+        row = result.scalar_one_or_none()
+        if row is None or row.status != "held":
+            raise HTTPException(status_code=409, detail="This stock hold is no longer active")
+        used = qty(actual)
+        if used <= 0:
+            return
+        if used > qty(row.quantity):
+            raise HTTPException(status_code=400, detail="That is more than this job still holds")
+        if row.raw_material_id is None:
+            raise HTTPException(status_code=400, detail="Only a raw material hold can be taken in part")
+        item = await self.lock_material(row.raw_material_id)
+        if qty(item.quantity) < used:
+            raise HTTPException(status_code=409, detail="Not enough of that sheet is on hand")
+        item.quantity = qty(qty(item.quantity) - used)
+        self.session.add(item)
+        await self._move(
+            product_id=None,
+            raw_material_id=row.raw_material_id,
+            quantity=-used,
+            reason=reason,
+            source_type=source_type,
+            source_id=source_id,
+            user_id=user_id,
+            note=note,
+        )
+        await self._alert_if_low(item, user_id)
+        left = qty(qty(row.quantity) - used)
+        row.quantity = left
+        if left == 0:
+            row.status = "consumed"
+        self.session.add(row)
+        await self.session.flush()
+
     async def receive(
         self,
         *,

@@ -16,6 +16,7 @@ from app.api.routes.product.product_schemas import (
     ProductOption,
     ProductRead,
     ProductUpdate,
+    RouteStepRead,
     RouteWrite,
 )
 from app.api.routes.user.user_model import Role
@@ -171,25 +172,25 @@ async def get_product(
     return await service.get_product(product_id, show_prices=can_see_prices(role_name))
 
 
-@router.put("/products/{product_id}/route", response_model=list[UUID])
+@router.put("/products/{product_id}/route", response_model=list[RouteStepRead])
 async def replace_route(
     product_id: UUID,
     data: RouteWrite,
     service: ProductServiceDep,
     session: PGSessionDep,
     user: CurrentUserDep,
-) -> list[UUID]:
+) -> list[RouteStepRead]:
     await _editor(session, user)
-    return await service.replace_route(product_id, data.operation_ids)
+    return await service.replace_route(product_id, data)
 
 
-@router.get("/products/{product_id}/route", response_model=list[UUID])
+@router.get("/products/{product_id}/route", response_model=list[RouteStepRead])
 async def get_route(
     product_id: UUID,
     service: ProductServiceDep,
     session: PGSessionDep,
     user: CurrentUserDep,
-) -> list[UUID]:
+) -> list[RouteStepRead]:
     await _viewer(session, user)
     return await service.list_route(product_id)
 

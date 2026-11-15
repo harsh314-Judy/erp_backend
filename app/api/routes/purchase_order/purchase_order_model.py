@@ -65,6 +65,8 @@ class PurchaseOrder(Entity, table=True):
         default=None, foreign_key="users.id", nullable=True, ondelete="SET NULL"
     )
     stock_received: bool = Field(default=False, nullable=False)
+    receipt_fail_reason: str | None = Field(default=None, max_length=32, nullable=True)
+    receipt_fail_note: str | None = Field(default=None, sa_type=Text, nullable=True)
     challan_number: str | None = Field(default=None, max_length=80, nullable=True)
     challan_note: str | None = Field(default=None, sa_type=Text, nullable=True)
 
