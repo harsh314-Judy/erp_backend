@@ -62,10 +62,19 @@ class RawMaterialService:
         await delete_model(self.session, RawMaterialCategory, category_id)
 
     async def list_materials(
-        self, pagination: PaginationParams, *, query: str | None, show_prices: bool, brief: bool = False
+        self,
+        pagination: PaginationParams,
+        *,
+        query: str | None,
+        show_prices: bool,
+        brief: bool = False,
+        remnants: bool = False,
     ) -> PaginatedResponse[RawMaterialRead]:
         statement = select(RawMaterial)
         count = select(func.count()).select_from(RawMaterial)
+        if remnants:
+            statement = statement.where(RawMaterial.is_remnant.is_(True))
+            count = count.where(RawMaterial.is_remnant.is_(True))
         if query:
             like = f"%{query.strip()}%"
             statement = statement.where(RawMaterial.name.ilike(like))
@@ -102,6 +111,11 @@ class RawMaterialService:
         if data.supplier_id is not None:
             await self._assert_material_supplier(data.supplier_id)
         row = RawMaterial.model_validate(data.model_dump())
+        row.thickness = _blank(row.thickness)
+        row.grade = _blank(row.grade)
+        row.size = _blank(row.size)
+        row.is_remnant = False
+        row.parent_raw_material_id = None
         self.session.add(row)
         await self.session.flush()
         if data.supplier_id is not None:
@@ -122,7 +136,24 @@ class RawMaterialService:
         if changes.get("category_id") is not None:
             await get_or_404(self.session, RawMaterialCategory, changes["category_id"])
         previous_supplier = row.supplier_id
+        kept_quantity = row.quantity
+        if "quantity" in changes:
+            from app.api.routes.inventory.inventory_services import qty
+
+            incoming = qty(changes["quantity"])
+            if incoming != qty(row.quantity):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Change on-hand quantity with a counted adjustment",
+                )
         apply_changes(row, data)
+        row.quantity = kept_quantity
+        if "thickness" in changes:
+            row.thickness = _blank(row.thickness)
+        if "grade" in changes:
+            row.grade = _blank(row.grade)
+        if "size" in changes:
+            row.size = _blank(row.size)
         if "supplier_id" in changes:
             await self._sync_supplier_link(row.id, previous_supplier, row.supplier_id)
         self.session.add(row)
@@ -203,3 +234,10 @@ class RawMaterialService:
     def _group(value: str) -> None:
         if value not in _GROUPS:
             raise HTTPException(status_code=400, detail="Stock group must be core or other")
+
+
+def _blank(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip()
+    return text or None

@@ -28,6 +28,9 @@ class RawMaterialCreate(BaseModel):
     responsible_user_id: UUID | None = None
     category_id: UUID
     supplier_id: UUID | None = None
+    thickness: str | None = Field(default=None, max_length=32)
+    grade: str | None = Field(default=None, max_length=32)
+    size: str | None = Field(default=None, max_length=64)
 
 
 class RawMaterialUpdate(BaseModel):
@@ -43,6 +46,9 @@ class RawMaterialUpdate(BaseModel):
     responsible_user_id: UUID | None = None
     category_id: UUID | None = None
     supplier_id: UUID | None = None
+    thickness: str | None = Field(default=None, max_length=32)
+    grade: str | None = Field(default=None, max_length=32)
+    size: str | None = Field(default=None, max_length=64)
 
 
 class RawMaterialRead(BaseModel):
@@ -61,6 +67,11 @@ class RawMaterialRead(BaseModel):
     responsible_user_id: UUID | None = None
     category_id: UUID | None = None
     supplier_id: UUID | None = None
+    thickness: str | None = None
+    grade: str | None = None
+    size: str | None = None
+    parent_raw_material_id: UUID | None = None
+    is_remnant: bool = False
     on_hand: Decimal | None = None
     held: Decimal | None = None
     available: Decimal | None = None

@@ -13,8 +13,14 @@ from app.api.routes.production.production_schemas import (
     ProductionJobUpdate,
     RequirementUpdate,
     StageComplete,
+    StageProblem,
+    StageReturn,
     StageRevert,
+    StageScrap,
+    StageSendCreate,
+    StageWorkers,
     VarianceCreate,
+    VendorOption,
 )
 from app.api.routes.user.user_model import Role
 from app.api.schemas.pagination import PaginatedResponse, PaginationDep
@@ -45,6 +51,18 @@ async def list_jobs(
     if not (role_has(name, VIEW_ASSIGNED_WORK) or role_has(name, EDIT_INVENTORY) or role_has(name, APPROVE_JOBS)):
         forbid()
     return await service.list_jobs(pagination, user)
+
+
+@router.get("/vendors", response_model=list[VendorOption])
+async def list_vendors(
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> list[VendorOption]:
+    name = await _role(session, user)
+    if not (role_has(name, VIEW_ASSIGNED_WORK) or role_has(name, EDIT_INVENTORY)):
+        forbid()
+    return await service.list_vendors()
 
 
 @router.post("/", response_model=ProductionJobDetail, status_code=status.HTTP_201_CREATED)
@@ -100,6 +118,21 @@ async def start_job(
     return await service.start_job(job_id, user)
 
 
+@router.post("/{job_id}/stages/{stage_id}/start", response_model=ProductionJobDetail)
+async def start_stage(
+    job_id: UUID,
+    stage_id: UUID,
+    data: StageWorkers,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not (role_has(name, EDIT_INVENTORY) or role_has(name, VIEW_ASSIGNED_WORK)):
+        forbid()
+    return await service.start_stage(job_id, stage_id, data, user)
+
+
 @router.post("/{job_id}/stages/{stage_id}/complete", response_model=ProductionJobDetail)
 async def complete_stage(
     job_id: UUID,
@@ -113,6 +146,80 @@ async def complete_stage(
     if not role_has(name, VIEW_ASSIGNED_WORK) and not role_has(name, EDIT_INVENTORY):
         forbid()
     return await service.complete_stage(job_id, stage_id, data, user)
+
+
+@router.post("/{job_id}/stages/{stage_id}/send", response_model=ProductionJobDetail)
+async def send_stage(
+    job_id: UUID,
+    stage_id: UUID,
+    data: StageSendCreate,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not role_has(name, VIEW_ASSIGNED_WORK) and not role_has(name, EDIT_INVENTORY):
+        forbid()
+    return await service.send_out(job_id, stage_id, data, user)
+
+
+@router.post("/{job_id}/stages/{stage_id}/return", response_model=ProductionJobDetail)
+async def return_stage(
+    job_id: UUID,
+    stage_id: UUID,
+    data: StageReturn,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not role_has(name, VIEW_ASSIGNED_WORK) and not role_has(name, EDIT_INVENTORY):
+        forbid()
+    return await service.come_back(job_id, stage_id, data, user)
+
+
+@router.post("/{job_id}/stages/{stage_id}/scrap", response_model=ProductionJobDetail)
+async def scrap_stage(
+    job_id: UUID,
+    stage_id: UUID,
+    data: StageScrap,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not role_has(name, VIEW_ASSIGNED_WORK) and not role_has(name, EDIT_INVENTORY):
+        forbid()
+    return await service.record_scrap(job_id, stage_id, data, user)
+
+
+@router.post("/{job_id}/stages/{stage_id}/problem", response_model=ProductionJobDetail)
+async def problem_stage(
+    job_id: UUID,
+    stage_id: UUID,
+    data: StageProblem,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not role_has(name, VIEW_ASSIGNED_WORK) and not role_has(name, EDIT_INVENTORY):
+        forbid()
+    return await service.set_problem(job_id, stage_id, data, user)
+
+
+@router.post("/{job_id}/stages/{stage_id}/problem/clear", response_model=ProductionJobDetail)
+async def clear_stage_problem(
+    job_id: UUID,
+    stage_id: UUID,
+    service: ProductionServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> ProductionJobDetail:
+    name = await _role(session, user)
+    if not role_has(name, VIEW_ASSIGNED_WORK) and not role_has(name, EDIT_INVENTORY):
+        forbid()
+    return await service.clear_problem(job_id, stage_id, user)
 
 
 @router.post("/{job_id}/revert", response_model=ProductionJobDetail)

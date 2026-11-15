@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
 from sqlalchemy import func
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import select
 
-from app.api.routes.inventory.inventory_model import StockReservation
+from app.api.routes.inventory.inventory_model import InventoryMovement, StockReservation
 from app.api.routes.inventory.inventory_services import InventoryService, users_for_operation
 from app.api.routes.invoice.gst import qty
 from app.api.routes.notification.notification_services import notify
@@ -19,6 +20,7 @@ from app.api.routes.production.production_model import (
     ProductionJob,
     ProductionJobInput,
     ProductionJobStage,
+    StageSend,
 )
 from app.api.routes.production.production_schemas import (
     InputRead,
@@ -30,9 +32,18 @@ from app.api.routes.production.production_schemas import (
     ProductionJobRead,
     ProductionJobUpdate,
     RequirementUpdate,
+    PROBLEM_REASONS,
+    SCRAP_REASONS,
+    SendRead,
     StageComplete,
+    StageProblem,
     StageRead,
+    StageReturn,
     StageRevert,
+    StageScrap,
+    StageSendCreate,
+    StageWorkers,
+    VendorOption,
     VarianceCreate,
     VarianceRead,
 )
@@ -45,6 +56,15 @@ from app.db.repository import commit_or_conflict, get_or_404, to_page
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _reject_reason(operation_name: str) -> str:
+    key = operation_name.lower()
+    if key == "coloring":
+        return "color reject"
+    if key == "polishing":
+        return "scratch"
+    return "other"
 
 
 def _person(actor: User) -> str:
@@ -153,7 +173,27 @@ class ProductionService:
         self, data: ProductionJobCreate, actor: User, *, commit: bool = True
     ) -> ProductionJobDetail:
         product = await get_or_404(self.session, Product, data.product_id)
-        operation_ids = data.operation_ids or await self._default_route(product.id)
+        planned = await self._planned_steps(product.id)
+        if data.operation_ids:
+            by_operation: dict[UUID, ProductRouteStep] = {}
+            for step in planned:
+                by_operation.setdefault(step.operation_id, step)
+            chosen = []
+            for operation_id in data.operation_ids:
+                match = by_operation.get(operation_id)
+                chosen.append(
+                    (
+                        operation_id,
+                        bool(match.allows_send_out) if match else False,
+                        match.standard_scrap_percent if match else None,
+                    )
+                )
+        else:
+            chosen = [
+                (step.operation_id, bool(step.allows_send_out), step.standard_scrap_percent)
+                for step in planned
+            ]
+        operation_ids = [item[0] for item in chosen]
         if not operation_ids:
             raise HTTPException(status_code=400, detail="Choose at least one operation")
         first = await get_or_404(self.session, Operation, operation_ids[0])
@@ -181,7 +221,7 @@ class ProductionService:
         self.session.add(job)
         await self.session.flush()
         self._append_event(job, actor, "created", None, "Job opened")
-        for index, operation_id in enumerate(operation_ids):
+        for index, (operation_id, send_out, scrap_percent) in enumerate(chosen):
             managers = await users_for_operation(self.session, operation_id)
             self.session.add(
                 ProductionJobStage(
@@ -191,6 +231,8 @@ class ProductionService:
                     assigned_user_id=data.assigned_user_id
                     or (managers[0] if managers else product.responsible_user_id),
                     status="active" if index == 0 else "pending",
+                    allows_send_out=send_out,
+                    standard_scrap_percent=scrap_percent,
                 )
             )
         components = list(
@@ -223,6 +265,37 @@ class ProductionService:
         await commit_or_conflict(self.session)
         return await self._detail(job)
 
+    async def start_stage(
+        self, job_id: UUID, stage_id: UUID, data: StageWorkers, actor: User
+    ) -> ProductionJobDetail:
+        job = await get_or_404(self.session, ProductionJob, job_id)
+        stage = await get_or_404(self.session, ProductionJobStage, stage_id)
+        if stage.job_id != job.id:
+            raise HTTPException(status_code=404, detail="This stage is not on this job")
+        if job.status == "pending":
+            if stage.status != "active":
+                raise HTTPException(status_code=409, detail="This stage is not the active one")
+            await self._try_start(job, actor, required=True)
+        elif job.status != "in_progress" or stage.status != "active":
+            raise HTTPException(status_code=409, detail="This stage is not the active one")
+        workers = await self._resolve_workers(stage.operation_id, data)
+        self._credit_workers(stage, workers)
+        if stage.started_at is None:
+            stage.started_at = _now()
+        self.session.add(stage)
+        operation = await get_or_404(self.session, Operation, stage.operation_id)
+        self._append_event(
+            job,
+            actor,
+            "started",
+            operation.name,
+            f"Started by {stage.worker_name}",
+            stage.worker_name,
+        )
+        self.session.add(job)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
     async def complete_stage(
         self, job_id: UUID, stage_id: UUID, data: StageComplete, actor: User
     ) -> ProductionJobDetail:
@@ -233,39 +306,71 @@ class ProductionService:
         if stage.job_id != job.id or stage.status != "active":
             raise HTTPException(status_code=409, detail="This stage is not the active one")
         operation = await get_or_404(self.session, Operation, stage.operation_id)
-        if operation.name == "polishing" and data.polish_type not in {"dry", "wet"}:
+        if operation.name.lower() == "polishing" and data.polish_type not in {"dry", "wet"}:
             raise HTTPException(status_code=400, detail="Polishing needs a dry or wet finish")
+        if operation.name.lower() == "shaping" and data.first_piece_ok is None:
+            raise HTTPException(status_code=400, detail="Shaping needs a first-piece yes or no")
         workers = await self._resolve_workers(stage.operation_id, data)
-        made = qty(data.quantity) if data.quantity is not None else qty(job.quantity)
+        outside = await self._outside_open(stage.id)
+        remaining = qty(job.quantity) - qty(stage.good_quantity) - outside
+        if remaining < 0:
+            remaining = Decimal("0")
+        made = qty(data.quantity) if data.quantity is not None else remaining
+        if made <= 0:
+            raise HTTPException(status_code=400, detail="Enter how many were finished")
+        if outside > 0 and made > remaining:
+            raise HTTPException(status_code=400, detail="Pieces still outside cannot be marked done")
+        stage.good_quantity = qty(stage.good_quantity) + made
+        if data.polish_type:
+            stage.polish_type = data.polish_type
+        if data.notes is not None:
+            stage.notes = data.notes
+        if operation.name.lower() == "shaping":
+            stage.first_piece_ok = data.first_piece_ok
+        self._credit_workers(stage, workers)
+        if stage.started_at is None:
+            stage.started_at = _now()
+        self.session.add(stage)
+        await self._floor_line(
+            job,
+            stage,
+            workers,
+            actor,
+            output_quantity=made,
+            scrap_quantity=Decimal("0"),
+            notes=data.notes,
+        )
+        if qty(data.scrap_quantity) > 0:
+            stage.scrap_quantity = qty(stage.scrap_quantity) + qty(data.scrap_quantity)
+            self.session.add(stage)
+            await self._floor_line(
+                job,
+                stage,
+                workers,
+                actor,
+                output_quantity=Decimal("0"),
+                scrap_quantity=qty(data.scrap_quantity),
+                notes="other",
+            )
+        sheet_note = await self._record_cutting(job, operation, data, actor)
+        if qty(stage.good_quantity) < qty(job.quantity):
+            partial = f"Recorded {made} good at {operation.name}. {stage.good_quantity} of {job.quantity} so far · by {stage.worker_name}"
+            if sheet_note:
+                partial = f"{partial}. {sheet_note}"
+            self._append_event(
+                job,
+                actor,
+                "advanced",
+                operation.name,
+                partial,
+                stage.worker_name,
+            )
+            self.session.add(job)
+            await commit_or_conflict(self.session)
+            return await self._detail(job)
         stage.status = "done"
-        stage.polish_type = data.polish_type
-        stage.notes = data.notes
-        stage.worker_id = workers[0].id
-        stage.worker_name = ", ".join(worker.name for worker in workers)[:120]
         stage.completed_at = _now()
         self.session.add(stage)
-        product = await self.session.get(Product, job.product_id)
-        unit_name = "pcs"
-        if product is not None:
-            from app.api.routes.product.product_model import MeasurementUnit
-
-            unit = await self.session.get(MeasurementUnit, product.measurement_unit_id)
-            if unit is not None and unit.name:
-                unit_name = unit.name[:16]
-        from app.api.routes.floor.floor_services import FloorService
-
-        await FloorService(self.session).record_stage(
-            stage_id=stage.id,
-            job_id=job.id,
-            operation_id=stage.operation_id,
-            product_id=job.product_id,
-            output_name=product.product_name if product is not None else "Item",
-            output_quantity=made,
-            output_unit=unit_name,
-            scrap_quantity=qty(data.scrap_quantity),
-            workers=workers,
-            actor=actor,
-        )
         stages = await self._stages(job.id)
         upcoming = next((item for item in stages if item.status == "pending"), None)
         if upcoming is None:
@@ -296,12 +401,104 @@ class ProductionService:
             nxt = await self.session.get(Operation, upcoming.operation_id)
             moved = nxt.name if nxt else "the next stage"
         detail = f"Finished {operation.name}{mode} → {moved} · by {stage.worker_name}"
+        if sheet_note:
+            detail = f"{detail}. {sheet_note}"
         if data.notes and data.notes.strip():
             detail = f"{detail}. {data.notes.strip()}"
         self._append_event(job, actor, "advanced", operation.name, detail, stage.worker_name)
         self.session.add(job)
         await commit_or_conflict(self.session)
         return await self._detail(job)
+
+    async def record_scrap(
+        self, job_id: UUID, stage_id: UUID, data: StageScrap, actor: User
+    ) -> ProductionJobDetail:
+        job, stage, operation = await self._open_stage(job_id, stage_id)
+        reason = data.reason.strip().lower()
+        if reason not in SCRAP_REASONS:
+            raise HTTPException(status_code=400, detail="Choose a scrap reason")
+        workers = await self._resolve_workers(stage.operation_id, data)
+        stage.scrap_quantity = qty(stage.scrap_quantity) + qty(data.quantity)
+        self._credit_workers(stage, workers)
+        self.session.add(stage)
+        await self._floor_line(
+            job,
+            stage,
+            workers,
+            actor,
+            output_quantity=Decimal("0"),
+            scrap_quantity=qty(data.quantity),
+            notes=reason,
+        )
+        self._append_event(
+            job,
+            actor,
+            "variance",
+            operation.name,
+            f"Scrapped {data.quantity} at {operation.name} ({reason}) · by {stage.worker_name}",
+            stage.worker_name,
+        )
+        self.session.add(job)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
+    async def set_problem(
+        self, job_id: UUID, stage_id: UUID, data: StageProblem, actor: User
+    ) -> ProductionJobDetail:
+        job, stage, operation = await self._open_stage(job_id, stage_id)
+        reason = data.reason.strip().lower()
+        if reason not in PROBLEM_REASONS:
+            raise HTTPException(status_code=400, detail="Choose a problem")
+        previous_machine = stage.problem_machine_id
+        stage.problem_reason = reason
+        stage.problem_note = (data.note or "").strip() or None
+        stage.problem_opened_at = _now()
+        stage.problem_machine_id = None
+        if reason == "machine down":
+            machine_id = await self._machine_down(stage, data.machine_id)
+            stage.problem_machine_id = machine_id
+        self.session.add(stage)
+        await self.session.flush()
+        if previous_machine is not None and previous_machine != stage.problem_machine_id:
+            await self._raise_machine_if_clear(previous_machine)
+        detail = reason
+        if stage.problem_note:
+            detail = f"{detail}. {stage.problem_note}"
+        self._append_event(job, actor, "variance", operation.name, f"Problem: {detail}")
+        self.session.add(job)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
+    async def clear_problem(self, job_id: UUID, stage_id: UUID, actor: User) -> ProductionJobDetail:
+        job, stage, operation = await self._open_stage(job_id, stage_id)
+        if stage.problem_reason is None:
+            raise HTTPException(status_code=409, detail="This stage has no open problem")
+        was = stage.problem_reason
+        machine_id = stage.problem_machine_id
+        stage.problem_reason = None
+        stage.problem_note = None
+        stage.problem_opened_at = None
+        stage.problem_machine_id = None
+        self.session.add(stage)
+        await self.session.flush()
+        if machine_id is not None:
+            await self._raise_machine_if_clear(machine_id)
+        self._append_event(job, actor, "edited", operation.name, f"Cleared problem: {was}")
+        self.session.add(job)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
+    async def _open_stage(
+        self, job_id: UUID, stage_id: UUID
+    ) -> tuple[ProductionJob, ProductionJobStage, Operation]:
+        job = await get_or_404(self.session, ProductionJob, job_id)
+        if job.status != "in_progress":
+            raise HTTPException(status_code=409, detail="This job is not in progress")
+        stage = await get_or_404(self.session, ProductionJobStage, stage_id)
+        if stage.job_id != job.id or stage.status != "active":
+            raise HTTPException(status_code=409, detail="This stage is not the active one")
+        operation = await get_or_404(self.session, Operation, stage.operation_id)
+        return job, stage, operation
 
     async def revert_stage(self, job_id: UUID, data: StageRevert, actor: User) -> ProductionJobDetail:
         job = await get_or_404(self.session, ProductionJob, job_id)
@@ -314,6 +511,17 @@ class ProductionService:
         previous = done[-1]
         active = next((stage for stage in stages if stage.status == "active"), None)
         if active is not None:
+            await self._refuse_outside(active.id)
+        await self._refuse_outside(previous.id)
+        if active is not None:
+            from app.api.routes.floor.floor_services import FloorService
+
+            await FloorService(self.session).drop_stage(active.id)
+            await self._delete_sends(active.id)
+            active_machine = active.problem_machine_id
+            self._reset_stage_counts(active)
+            if active_machine is not None:
+                await self._raise_machine_if_clear(active_machine)
             active.status = "pending"
             active.started_at = None
             self.session.add(active)
@@ -321,13 +529,18 @@ class ProductionService:
         from app.api.routes.floor.floor_services import FloorService
 
         await FloorService(self.session).drop_stage(previous.id)
+        await self._delete_sends(previous.id)
         was = previous.polish_type
+        previous_machine = previous.problem_machine_id
         previous.status = "active"
         previous.completed_at = None
         previous.polish_type = None
         previous.notes = None
         previous.worker_id = None
         previous.worker_name = None
+        self._reset_stage_counts(previous)
+        if previous_machine is not None:
+            await self._raise_machine_if_clear(previous_machine)
         previous.started_at = _now()
         self.session.add(previous)
         job.status = next_status(job.status, "revert")
@@ -527,25 +740,187 @@ class ProductionService:
             self.session.add(item)
             seen.add(item.id)
             if consume and item.reservation_id is not None:
-                await self.inventory.consume(
-                    item.reservation_id,
+                await self._close_hold(
+                    item,
                     deducted,
-                    user_id=actor.id,
-                    source_type="production_job",
-                    source_id=job.id,
-                    note="Consumed when the job closed",
+                    actor,
+                    job,
+                    "Consumed when the job closed",
                 )
         if consume:
             for item in by_id.values():
                 if item.id not in seen and item.reservation_id is not None:
-                    await self.inventory.consume(
-                        item.reservation_id,
+                    await self._close_hold(
+                        item,
                         qty(item.planned_quantity),
-                        user_id=actor.id,
-                        source_type="production_job",
-                        source_id=job.id,
-                        note="Consumed the planned quantity",
+                        actor,
+                        job,
+                        "Consumed the planned quantity",
                     )
+
+    async def _close_hold(
+        self,
+        item: ProductionJobInput,
+        deducted: Decimal,
+        actor: User,
+        job: ProductionJob,
+        note: str,
+    ) -> None:
+        if item.reservation_id is None:
+            return
+        if await self._sheet_already_cut(item):
+            await self.inventory.release(item.reservation_id)
+            return
+        await self.inventory.consume(
+            item.reservation_id,
+            deducted,
+            user_id=actor.id,
+            source_type="production_job",
+            source_id=job.id,
+            note=note,
+        )
+
+    async def _sheet_already_cut(self, item: ProductionJobInput) -> bool:
+        if item.raw_material_id is None or qty(item.taken_quantity) <= 0:
+            return False
+        material = await self.session.get(RawMaterial, item.raw_material_id)
+        return material is not None and material.kind == "sheet"
+
+    async def _record_cutting(self, job: ProductionJob, operation: Operation, data: StageComplete, actor: User) -> str | None:
+        lines = [line for line in data.sheets if qty(line.sheets_used) > 0 or qty(line.remnant_quantity) > 0]
+        if operation.name.lower() != "cutting":
+            if lines:
+                raise HTTPException(status_code=400, detail="Sheets are recorded on cutting only")
+            return None
+        if not lines:
+            return None
+        seen: set[UUID] = set()
+        notes: list[str] = []
+        inputs = {item.id: item for item in await self._inputs(job.id)}
+        for line in lines:
+            if line.input_id in seen:
+                raise HTTPException(status_code=400, detail="Each sheet is listed once")
+            seen.add(line.input_id)
+            item = inputs.get(line.input_id)
+            if item is None or item.raw_material_id is None:
+                raise HTTPException(status_code=404, detail="That sheet is not on this job")
+            material = await self.inventory.lock_material(item.raw_material_id)
+            if material.kind != "sheet":
+                raise HTTPException(status_code=400, detail="Only sheet material is taken at cutting")
+            used = qty(line.sheets_used)
+            returned = qty(line.remnant_quantity)
+            size = (line.remnant_size or "").strip()
+            if returned > 0 and not size:
+                raise HTTPException(status_code=400, detail="A remnant needs a size")
+            if returned > 0 and used <= 0:
+                raise HTTPException(status_code=400, detail="Record how many sheets were used before returning a remnant")
+            if returned > used:
+                raise HTTPException(status_code=400, detail="The remnant is larger than the sheets used")
+            if used > 0:
+                if item.reservation_id is None:
+                    raise HTTPException(status_code=409, detail="This sheet is not held for the job")
+                await self.inventory.take_held(
+                    item.reservation_id,
+                    used,
+                    user_id=actor.id,
+                    source_type="production_job",
+                    source_id=job.id,
+                    note=f"Sheets used at cutting from {material.name}",
+                    reason="sheet_use",
+                )
+                item.taken_quantity = qty(qty(item.taken_quantity) + used)
+                self.session.add(item)
+                notes.append(f"used {used} {material.name}")
+            if returned > 0:
+                remnant = await self._remnant_row(material, size)
+                await self.inventory.receive(
+                    quantity=returned,
+                    reason="remnant",
+                    source_type="production_job",
+                    source_id=job.id,
+                    user_id=actor.id,
+                    raw_material_id=remnant.id,
+                    note=f"Remnant {size} returned from {material.name}",
+                )
+                notes.append(f"remnant {returned} ({size})")
+        return "Cutting stock: " + "; ".join(notes)
+
+    async def _remnant_row(self, parent: RawMaterial, size: str) -> RawMaterial:
+        found = await self.session.scalar(
+            select(RawMaterial).where(
+                RawMaterial.parent_raw_material_id == parent.id,
+                RawMaterial.is_remnant.is_(True),
+                func.lower(RawMaterial.size) == size.lower(),
+            )
+        )
+        if found is not None:
+            found.thickness = parent.thickness
+            found.grade = parent.grade
+            found.kind = parent.kind
+            found.measurement_unit_id = parent.measurement_unit_id
+            found.purchase_price = parent.purchase_price
+            found.price = parent.purchase_price
+            self.session.add(found)
+            return found
+        remnant = RawMaterial(
+            name=f"{parent.name} remnant {size}"[:255],
+            quantity=Decimal("0"),
+            alert_quantity=Decimal("0"),
+            measurement_unit_id=parent.measurement_unit_id,
+            price=parent.purchase_price,
+            purchase_price=parent.purchase_price,
+            kind=parent.kind,
+            stock_group=parent.stock_group,
+            category_id=parent.category_id,
+            supplier_id=parent.supplier_id,
+            thickness=parent.thickness,
+            grade=parent.grade,
+            size=size[:64],
+            parent_raw_material_id=parent.id,
+            is_remnant=True,
+        )
+        self.session.add(remnant)
+        await self.session.flush()
+        return remnant
+
+    async def _machine_down(self, stage: ProductionJobStage, machine_id: UUID | None) -> UUID | None:
+        from app.api.routes.machine.machine_model import Machine
+
+        count = int(
+            await self.session.scalar(
+                select(func.count()).select_from(Machine).where(Machine.operation_id == stage.operation_id)
+            )
+            or 0
+        )
+        if count == 0:
+            return None
+        if machine_id is None:
+            raise HTTPException(status_code=400, detail="Choose the machine that is down")
+        machine = await self.session.get(Machine, machine_id)
+        if machine is None or machine.operation_id != stage.operation_id:
+            raise HTTPException(status_code=400, detail="Choose a machine from this department")
+        machine.status = "down"
+        self.session.add(machine)
+        return machine.id
+
+    async def _raise_machine_if_clear(self, machine_id: UUID) -> None:
+        from app.api.routes.machine.machine_model import Machine
+
+        still = await self.session.scalar(
+            select(func.count())
+            .select_from(ProductionJobStage)
+            .where(
+                ProductionJobStage.problem_machine_id == machine_id,
+                ProductionJobStage.problem_reason.is_not(None),
+            )
+        )
+        if still:
+            return
+        machine = await self.session.get(Machine, machine_id)
+        if machine is None:
+            return
+        machine.status = "up"
+        self.session.add(machine)
 
     async def _free(self, item: ProductionJobInput) -> Decimal:
         if item.product_id is not None:
@@ -555,6 +930,153 @@ class ProductionService:
             material = await self.inventory.lock_material(item.raw_material_id)
             return await self.inventory.available_material(material)
         return qty(0)
+
+    async def list_vendors(self) -> list[VendorOption]:
+        from app.api.routes.supplier.supplier_model import Supplier
+
+        rows = await self.session.scalars(select(Supplier).order_by(Supplier.supplier_company_name))
+        return [VendorOption(id=row.id, name=row.supplier_company_name) for row in rows]
+
+    async def send_out(
+        self, job_id: UUID, stage_id: UUID, data: StageSendCreate, actor: User
+    ) -> ProductionJobDetail:
+        del actor
+        job, stage = await self._open_send_stage(job_id, stage_id)
+        if not stage.allows_send_out:
+            raise HTTPException(status_code=409, detail="This stage does not leave the plant")
+        from app.api.routes.supplier.supplier_model import Supplier
+
+        await get_or_404(self.session, Supplier, data.supplier_id)
+        outside = await self._outside_open(stage.id)
+        room = qty(job.quantity) - qty(stage.good_quantity) - outside
+        if room < 0:
+            room = Decimal("0")
+        if qty(data.quantity) > room:
+            raise HTTPException(status_code=400, detail="That is more than the pieces still at this stage")
+        self.session.add(
+            StageSend(
+                stage_id=stage.id,
+                job_id=job.id,
+                supplier_id=data.supplier_id,
+                quantity=qty(data.quantity),
+                sent_on=data.sent_on or datetime.now(ZoneInfo("Asia/Kolkata")).date(),
+            )
+        )
+        self.session.add(stage)
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
+    async def come_back(
+        self, job_id: UUID, stage_id: UUID, data: StageReturn, actor: User
+    ) -> ProductionJobDetail:
+        job, stage = await self._open_send_stage(job_id, stage_id)
+        send = await get_or_404(self.session, StageSend, data.send_id)
+        if send.stage_id != stage.id:
+            raise HTTPException(status_code=409, detail="That send is not on this stage")
+        good = qty(data.good_quantity)
+        rejected = qty(data.rejected_quantity)
+        if good + rejected <= 0:
+            raise HTTPException(status_code=400, detail="Enter how many came back")
+        still = qty(send.quantity) - qty(send.good_quantity) - qty(send.rejected_quantity)
+        if good + rejected > still:
+            raise HTTPException(status_code=400, detail="That is more than this send still has outside")
+        send.good_quantity = qty(send.good_quantity) + good
+        send.rejected_quantity = qty(send.rejected_quantity) + rejected
+        self.session.add(send)
+        if rejected > 0:
+            operation = await get_or_404(self.session, Operation, stage.operation_id)
+            stage.scrap_quantity = qty(stage.scrap_quantity) + rejected
+            self.session.add(stage)
+            from app.api.routes.department.department_model import DepartmentWorker
+            from app.api.routes.supplier.supplier_model import Supplier
+
+            workers = []
+            if stage.worker_id is not None:
+                person = await self.session.get(DepartmentWorker, stage.worker_id)
+                if person is not None:
+                    workers = [person]
+            vendor = await self.session.get(Supplier, send.supplier_id)
+            vendor_name = vendor.supplier_company_name if vendor else "the vendor"
+            reason = _reject_reason(operation.name)
+            await self._floor_line(
+                job,
+                stage,
+                workers,
+                actor,
+                output_quantity=Decimal("0"),
+                scrap_quantity=rejected,
+                notes=f"{reason}. Came back from {vendor_name}",
+            )
+        await commit_or_conflict(self.session)
+        return await self._detail(job)
+
+    async def _open_send_stage(self, job_id: UUID, stage_id: UUID) -> tuple[ProductionJob, ProductionJobStage]:
+        job = await get_or_404(self.session, ProductionJob, job_id)
+        if job.status != "in_progress":
+            raise HTTPException(status_code=409, detail="This job is not in progress")
+        stage = await get_or_404(self.session, ProductionJobStage, stage_id)
+        if stage.job_id != job.id or stage.status != "active":
+            raise HTTPException(status_code=409, detail="This stage is not the active one")
+        return job, stage
+
+    async def _outside_open(self, stage_id: UUID) -> Decimal:
+        total = Decimal("0")
+        rows = await self.session.scalars(select(StageSend).where(StageSend.stage_id == stage_id))
+        for row in rows:
+            still = qty(row.quantity) - qty(row.good_quantity) - qty(row.rejected_quantity)
+            if still > 0:
+                total += still
+        return total
+
+    async def _refuse_outside(self, stage_id: UUID) -> None:
+        if await self._outside_open(stage_id) > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Pieces are still outside. They have to come back before this stage can step back",
+            )
+
+    async def _delete_sends(self, stage_id: UUID) -> None:
+        rows = list(await self.session.scalars(select(StageSend).where(StageSend.stage_id == stage_id)))
+        for row in rows:
+            await self.session.delete(row)
+
+    async def _sends_by_stage(self, job_id: UUID) -> dict[UUID, list[SendRead]]:
+        from app.api.routes.supplier.supplier_model import Supplier
+
+        rows = list(await self.session.scalars(select(StageSend).where(StageSend.job_id == job_id)))
+        supplier_ids = {row.supplier_id for row in rows}
+        names = (
+            {
+                row.id: row.supplier_company_name
+                for row in await self.session.scalars(select(Supplier).where(Supplier.id.in_(supplier_ids)))  # type: ignore[attr-defined]
+            }
+            if supplier_ids
+            else {}
+        )
+        grouped: dict[UUID, list[SendRead]] = {}
+        for row in rows:
+            still = qty(row.quantity) - qty(row.good_quantity) - qty(row.rejected_quantity)
+            grouped.setdefault(row.stage_id, []).append(
+                SendRead(
+                    id=row.id,
+                    supplier_id=row.supplier_id,
+                    supplier_name=names.get(row.supplier_id, "Vendor"),
+                    quantity=row.quantity,
+                    sent_on=row.sent_on,
+                    good_quantity=row.good_quantity,
+                    rejected_quantity=row.rejected_quantity,
+                    still_out=still,
+                )
+            )
+        return grouped
+
+    async def _planned_steps(self, product_id: UUID) -> list[ProductRouteStep]:
+        rows = await self.session.scalars(
+            select(ProductRouteStep)
+            .where(ProductRouteStep.product_id == product_id)
+            .order_by(ProductRouteStep.position)
+        )
+        return list(rows)
 
     async def _default_route(self, product_id: UUID) -> list[UUID]:
         rows = await self.session.scalars(
@@ -578,7 +1100,54 @@ class ProductionService:
         )
         return list(result)
 
-    async def _resolve_workers(self, operation_id: UUID, data: StageComplete):
+    def _credit_workers(self, stage: ProductionJobStage, workers: list) -> None:
+        stage.worker_id = workers[0].id
+        stage.worker_name = ", ".join(worker.name for worker in workers)[:120]
+
+    def _reset_stage_counts(self, stage: ProductionJobStage) -> None:
+        stage.good_quantity = Decimal("0")
+        stage.scrap_quantity = Decimal("0")
+        stage.problem_reason = None
+        stage.problem_note = None
+        stage.problem_opened_at = None
+        stage.problem_machine_id = None
+        stage.first_piece_ok = None
+
+    async def _floor_line(
+        self,
+        job: ProductionJob,
+        stage: ProductionJobStage,
+        workers: list,
+        actor: User,
+        *,
+        output_quantity: Decimal,
+        scrap_quantity: Decimal,
+        notes: str | None,
+    ) -> None:
+        from app.api.routes.floor.floor_services import FloorService
+        from app.api.routes.product.product_model import MeasurementUnit
+
+        product = await self.session.get(Product, job.product_id)
+        unit_name = "pcs"
+        if product is not None:
+            unit = await self.session.get(MeasurementUnit, product.measurement_unit_id)
+            if unit is not None and unit.name:
+                unit_name = unit.name[:16]
+        await FloorService(self.session).record_stage(
+            stage_id=stage.id,
+            job_id=job.id,
+            operation_id=stage.operation_id,
+            product_id=job.product_id,
+            output_name=product.product_name if product is not None else "Item",
+            output_quantity=output_quantity,
+            output_unit=unit_name,
+            scrap_quantity=scrap_quantity,
+            workers=workers,
+            actor=actor,
+            notes=notes,
+        )
+
+    async def _resolve_workers(self, operation_id: UUID, data: StageWorkers):
         from app.api.routes.department.department_model import DepartmentWorker
 
         wanted = list(data.worker_ids)
@@ -690,6 +1259,8 @@ class ProductionService:
             if person is not None:
                 assignee = _person(person)
         open_job = job.status in {"pending", "in_progress", "awaiting_approval"}
+        active = next((stage for stage in stages if stage.status == "active"), None)
+        focus = active or (stages[-1] if stages else None)
         return ProductionJobRead(
             id=job.id,
             product_id=job.product_id,
@@ -710,6 +1281,9 @@ class ProductionService:
             assigned_user_name=assignee,
             stages_done=sum(1 for stage in stages if stage.status == "done"),
             stages_total=len(stages),
+            good_quantity=qty(focus.good_quantity) if focus is not None else Decimal("0"),
+            scrap_quantity=sum((qty(stage.scrap_quantity) for stage in stages), Decimal("0")),
+            problem_reason=next((stage.problem_reason for stage in stages if stage.problem_reason), None),
         )
 
     async def _assignee_id(self, job_id: UUID) -> UUID | None:
@@ -770,33 +1344,81 @@ class ProductionService:
 
     async def _detail(self, job: ProductionJob) -> ProductionJobDetail:
         summary = await self._summary(job)
+        from app.api.routes.machine.machine_model import Machine
+
+        stage_rows = await self._stages(job.id)
+        send_map = await self._sends_by_stage(job.id)
         stages: list[StageRead] = []
-        for stage in await self._stages(job.id):
+        for stage in stage_rows:
             operation = await self.session.get(Operation, stage.operation_id)
+            machine_name = None
+            if stage.problem_machine_id is not None:
+                machine = await self.session.get(Machine, stage.problem_machine_id)
+                machine_name = machine.name if machine else None
+            sends = send_map.get(stage.id, [])
+            outside_quantity = sum((row.still_out for row in sends if row.still_out > 0), Decimal("0"))
             stages.append(
                 StageRead.model_validate(stage).model_copy(
-                    update={"operation_name": operation.name if operation else None}
+                    update={
+                        "operation_name": operation.name if operation else None,
+                        "problem_machine_name": machine_name,
+                        "sends": sends,
+                        "outside_quantity": outside_quantity,
+                    }
                 )
             )
+        active_stage = next((stage for stage in stage_rows if stage.status == "active"), None)
+        if active_stage is not None:
+            pieces_here = qty(active_stage.good_quantity)
+        else:
+            done = [stage for stage in stage_rows if stage.status == "done"]
+            pieces_here = qty(done[-1].good_quantity) if done else Decimal("0")
         inputs: list[InputRead] = []
+        sheets_held = Decimal("0")
+        sheets_taken = Decimal("0")
         for item in await self._inputs(job.id):
             name = None
             available = None
+            kind = None
+            held_quantity = Decimal("0")
             if item.product_id is not None:
                 product = await self.session.get(Product, item.product_id)
                 name = product.product_name if product else None
+                kind = "product"
                 if product is not None and job.status == "pending":
                     available = await self.inventory.available_product(product)
             if item.raw_material_id is not None:
                 material = await self.session.get(RawMaterial, item.raw_material_id)
                 name = material.name if material else None
+                kind = material.kind if material else None
                 if material is not None and job.status == "pending":
                     available = await self.inventory.available_material(material)
+                if material is not None and material.kind == "sheet":
+                    sheets_taken += qty(item.taken_quantity)
+            if item.reservation_id is not None:
+                reservation = await self.session.get(StockReservation, item.reservation_id)
+                if reservation is not None and reservation.status == "held":
+                    held_quantity = qty(reservation.quantity)
+                    if kind == "sheet":
+                        sheets_held += held_quantity
             inputs.append(
                 InputRead.model_validate(item).model_copy(
-                    update={"item_name": name, "available": available}
+                    update={
+                        "item_name": name,
+                        "available": available,
+                        "kind": kind,
+                        "taken_quantity": qty(item.taken_quantity),
+                        "held_quantity": held_quantity,
+                    }
                 )
             )
+        remnant = await self.session.scalar(
+            select(func.coalesce(func.sum(InventoryMovement.quantity), 0)).where(
+                InventoryMovement.source_type == "production_job",
+                InventoryMovement.source_id == job.id,
+                InventoryMovement.reason == "remnant",
+            )
+        )
         return ProductionJobDetail(
             **summary.model_dump(),
             stages=stages,
@@ -804,6 +1426,10 @@ class ProductionService:
             cancellation_reason=job.cancellation_reason,
             events=self._events(job),
             variances=self._variances(job),
+            sheets_held=sheets_held,
+            sheets_taken=sheets_taken,
+            remnant_returned=qty(remnant or 0),
+            pieces_here=pieces_here,
         )
 
     def _append_event(
@@ -900,17 +1526,25 @@ class ProductionService:
         return "Item"
 
     async def _resize_hold(self, item: ProductionJobInput, old: Decimal, new_qty: Decimal) -> None:
+        del old
         reservation = None
         if item.reservation_id is not None:
             reservation = await self.session.get(StockReservation, item.reservation_id)
             if reservation is None or reservation.status != "held":
                 reservation = None
                 item.reservation_id = None
+        taken = qty(item.taken_quantity)
+        if new_qty < taken:
+            raise HTTPException(
+                status_code=400,
+                detail="Sheets already used are above that requirement",
+            )
+        target = qty(new_qty - taken)
         if reservation is None:
-            if new_qty <= 0:
+            if target <= 0:
                 return
             held = await self.inventory.hold(
-                quantity=new_qty,
+                quantity=target,
                 source_type="production_job_input",
                 source_id=item.id,
                 product_id=item.product_id,
@@ -918,14 +1552,14 @@ class ProductionService:
             )
             item.reservation_id = held.id
             return
-        delta = new_qty - old
+        delta = target - qty(reservation.quantity)
         if delta > 0:
             free = await self._free(item)
             if free < delta:
                 raise HTTPException(status_code=409, detail="Not enough free stock to raise this requirement")
-        if new_qty <= 0:
+        if target <= 0:
             await self.inventory.release(reservation.id)
             item.reservation_id = None
             return
-        reservation.quantity = new_qty
+        reservation.quantity = target
         self.session.add(reservation)

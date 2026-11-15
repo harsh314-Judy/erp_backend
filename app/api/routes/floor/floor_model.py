@@ -43,7 +43,7 @@ class FloorEntry(Entity, table=True):
         default=None,
         foreign_key="production_job_stages.id",
         nullable=True,
-        unique=True,
+        index=True,
         ondelete="SET NULL",
     )
     created_by_user_id: UUID | None = Field(

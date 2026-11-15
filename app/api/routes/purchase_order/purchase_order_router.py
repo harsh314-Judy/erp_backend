@@ -13,6 +13,7 @@ from app.api.security.permissions import (
     role_has,
 )
 from app.api.routes.purchase_order.purchase_order_schemas import (
+    ReceiptInspect,
     PurchaseOrderProductCreate,
     PurchaseOrderProductRead,
     PurchaseOrderProductUpdate,
@@ -206,6 +207,20 @@ async def update_purchase_order(
     if not role_has(name, MANAGE_PURCHASING):
         forbid()
     return await service.update_order(order_id, data, user)
+
+
+@router.post("/purchase-orders/{order_id}/inspect")
+async def inspect_purchase_receipt(
+    order_id: UUID,
+    data: ReceiptInspect,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.inspect_receipt(order_id, data, user)
 
 
 @router.post("/purchase-orders/{order_id}/arrived")

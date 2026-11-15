@@ -20,6 +20,7 @@ from app.api.routes.sales.sales_services import SalesService
 from app.api.routes.supplier.supplier_services import SupplierService
 from app.api.routes.attachment.attachment_services import AttachmentService
 from app.api.routes.inventory.inventory_services import InventoryService
+from app.api.routes.machine.machine_services import MachineService
 from app.api.routes.invoice.invoice_services import InvoiceService
 from app.api.routes.purchase_order.purchase_order_services import PurchaseFlowService
 from app.api.routes.report.report_services import ReportService
@@ -134,6 +135,10 @@ def get_report_service(pg_session: PGSessionDep) -> ReportService:
     return ReportService(pg_session)
 
 
+def get_machine_service(pg_session: PGSessionDep) -> MachineService:
+    return MachineService(pg_session)
+
+
 def get_department_service(pg_session: PGSessionDep) -> DepartmentService:
     return DepartmentService(pg_session)
 
@@ -177,5 +182,6 @@ type ReportServiceDep = Annotated[ReportService, Depends(get_report_service)]
 type PurchaseFlowServiceDep = Annotated[PurchaseFlowService, Depends(get_purchase_flow_service)]
 type AttachmentServiceDep = Annotated[AttachmentService, Depends(get_attachment_service)]
 type DepartmentServiceDep = Annotated[DepartmentService, Depends(get_department_service)]
+type MachineServiceDep = Annotated[MachineService, Depends(get_machine_service)]
 type FloorServiceDep = Annotated[FloorService, Depends(get_floor_service)]
 type TradingServiceDep = Annotated[TradingService, Depends(get_trading_service)]

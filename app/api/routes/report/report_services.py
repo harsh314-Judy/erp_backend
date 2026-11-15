@@ -12,9 +12,13 @@ from app.api.routes.inventory.inventory_services import _status
 from app.api.routes.invoice.gst import qty
 from app.api.routes.report.report_schemas import (
     DashboardRead,
+    DepartmentYield,
+    LateJob,
     LowStockItem,
+    MachineDown,
     ProductionReport,
     SalesReport,
+    ShopReport,
 )
 from app.api.routes.user.user_model import Role, User
 from app.api.security.permissions import VIEW_FINANCIALS, role_has
@@ -203,6 +207,14 @@ class ReportService:
                       coalesce((SELECT role_name FROM roles WHERE id = :role_id), 'staff') AS role_name,
                       (SELECT count(*) FROM production_jobs WHERE status = 'awaiting_approval') AS approvals,
                       (SELECT count(*) FROM invoices WHERE status <> 'paid') AS unpaid,
+                      (SELECT coalesce(sum(total_amount - amount_paid), 0) FROM invoices WHERE status <> 'paid') AS unpaid_amount,
+                      (SELECT count(*) FROM production_jobs
+                        WHERE due_at < now()
+                          AND status IN ('pending', 'in_progress', 'awaiting_approval')) AS late_jobs,
+                      (SELECT count(*) FROM production_job_stages s
+                        JOIN production_jobs j ON j.id = s.job_id
+                        WHERE s.problem_reason IS NOT NULL
+                          AND j.status IN ('pending', 'in_progress', 'awaiting_approval')) AS open_problems,
                       (SELECT count(*) FROM production_job_stages
                         WHERE assigned_user_id = :user_id AND status = 'active') AS my_jobs,
                       (SELECT count(*) FROM purchase_orders
@@ -230,6 +242,15 @@ class ReportService:
                         ) ORDER BY product_name)
                         FROM products WHERE quantity < alert_quantity
                       ), '[]'::json) AS low_products,
+                      coalesce((
+                        SELECT json_agg(json_build_object(
+                          'name', m.name,
+                          'operation_name', o.name
+                        ) ORDER BY o.name, m.name)
+                        FROM machines m
+                        JOIN operations o ON o.id = m.operation_id
+                        WHERE m.status = 'down'
+                      ), '[]'::json) AS machines_down,
                       coalesce((
                         SELECT json_agg(json_build_object(
                           'kind', 'raw_material',
@@ -270,8 +291,82 @@ class ReportService:
             low_stock_items=shortages,
             approvals=int(row.approvals or 0),
             unpaid_invoices=int(row.unpaid or 0),
+            unpaid_amount=row.unpaid_amount if role_has(role_name, VIEW_FINANCIALS) else None,
+            late_jobs=int(row.late_jobs or 0),
+            open_problems=int(row.open_problems or 0),
+            machines_down=[
+                MachineDown(name=item["name"], operation_name=item["operation_name"])
+                for item in _json_list(row.machines_down)
+                if item.get("name") and item.get("operation_name")
+            ],
             my_jobs=int(row.my_jobs or 0),
             incoming_shipments=int(row.incoming or 0),
+        )
+
+    async def shop_report(self, actor: User) -> ShopReport:
+        role = await self.session.get(Role, actor.role_id)
+        role_name = role.role_name if role else ""
+        yield_rows = (
+            await self.session.execute(
+                text(
+                    """
+                    SELECT o.name AS name,
+                           coalesce(sum(f.output_quantity), 0) AS good,
+                           coalesce(sum(f.scrap_quantity), 0) AS scrap
+                    FROM floor_entries f
+                    JOIN operations o ON o.id = f.operation_id
+                    WHERE f.entry_date >= ((now() AT TIME ZONE 'Asia/Kolkata')::date - 6)
+                    GROUP BY o.name
+                    ORDER BY o.name
+                    """
+                )
+            )
+        ).mappings().all()
+        late_rows = (
+            await self.session.execute(
+                text(
+                    """
+                    SELECT j.id, p.product_name, j.due_at, j.status, o.name AS current_operation_name
+                    FROM production_jobs j
+                    LEFT JOIN products p ON p.id = j.product_id
+                    LEFT JOIN operations o ON o.id = j.current_operation_id
+                    WHERE j.due_at < now()
+                      AND j.status IN ('pending', 'in_progress', 'awaiting_approval')
+                    ORDER BY j.due_at
+                    """
+                )
+            )
+        ).mappings().all()
+        money = (
+            await self.session.execute(
+                text(
+                    """
+                    SELECT count(*) AS unpaid_count,
+                           coalesce(sum(total_amount - amount_paid), 0) AS unpaid_total
+                    FROM invoices
+                    WHERE status <> 'paid'
+                    """
+                )
+            )
+        ).one()
+        show_money = role_has(role_name, VIEW_FINANCIALS)
+        return ShopReport(
+            yields=[
+                DepartmentYield(name=row["name"], good=row["good"], scrap=row["scrap"])
+                for row in yield_rows
+            ],
+            late_jobs=[
+                LateJob(
+                    id=row["id"],
+                    product_name=row["product_name"],
+                    due_at=row["due_at"],
+                    status=row["status"],
+                    current_operation_name=row["current_operation_name"],
+                )
+                for row in late_rows
+            ],
+            unpaid_count=int(money.unpaid_count or 0),
+            unpaid_total=money.unpaid_total if show_money else None,
         )
 
 

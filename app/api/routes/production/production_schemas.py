@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -25,14 +25,57 @@ class ProductionJobUpdate(BaseModel):
     assigned_user_id: UUID | None = None
 
 
-class StageComplete(BaseModel):
-    polish_type: str | None = None
-    notes: str | None = None
+PROBLEM_REASONS = (
+    "machine down",
+    "no material",
+    "waiting for previous stage",
+    "people short",
+    "outside, not back",
+    "other",
+)
+SCRAP_REASONS = (
+    "cut wrong",
+    "bend crack",
+    "wrong angle",
+    "weld defect",
+    "scratch",
+    "color reject",
+    "pack damage",
+    "other",
+)
+
+
+class StageWorkers(BaseModel):
     worker_id: UUID | None = None
     worker_name: str | None = Field(default=None, max_length=120)
     worker_ids: list[UUID] = Field(default_factory=list, max_length=3)
+
+
+class SheetUse(BaseModel):
+    input_id: UUID
+    sheets_used: Decimal = Field(default=Decimal("0"), ge=0)
+    remnant_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+    remnant_size: str | None = Field(default=None, max_length=64)
+
+
+class StageComplete(StageWorkers):
+    polish_type: str | None = None
+    notes: str | None = None
     quantity: Decimal | None = Field(default=None, ge=0)
     scrap_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+    first_piece_ok: bool | None = None
+    sheets: list[SheetUse] = Field(default_factory=list)
+
+
+class StageScrap(StageWorkers):
+    quantity: Decimal = Field(gt=0)
+    reason: str
+
+
+class StageProblem(BaseModel):
+    reason: str
+    note: str | None = None
+    machine_id: UUID | None = None
 
 
 class StageRevert(BaseModel):
@@ -107,6 +150,49 @@ class StageRead(BaseModel):
     worker_name: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    good_quantity: Decimal = Decimal("0")
+    scrap_quantity: Decimal = Decimal("0")
+    problem_reason: str | None = None
+    problem_note: str | None = None
+    problem_opened_at: datetime | None = None
+    first_piece_ok: bool | None = None
+    problem_machine_id: UUID | None = None
+    problem_machine_name: str | None = None
+    allows_send_out: bool = False
+    standard_scrap_percent: Decimal | None = None
+    outside_quantity: Decimal = Decimal("0")
+    sends: list["SendRead"] = Field(default_factory=list)
+
+
+class SendRead(BaseModel):
+    id: UUID
+    supplier_id: UUID
+    supplier_name: str
+    quantity: Decimal
+    sent_on: date
+    good_quantity: Decimal
+    rejected_quantity: Decimal
+    still_out: Decimal
+
+
+class StageSendCreate(BaseModel):
+    supplier_id: UUID
+    quantity: Decimal = Field(gt=0)
+    sent_on: date | None = None
+
+
+class StageReturn(BaseModel):
+    send_id: UUID
+    good_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+    rejected_quantity: Decimal = Field(default=Decimal("0"), ge=0)
+
+
+class VendorOption(BaseModel):
+    id: UUID
+    name: str
+
+
+StageRead.model_rebuild()
 
 
 class InputRead(BaseModel):
@@ -120,6 +206,9 @@ class InputRead(BaseModel):
     actual_quantity: Decimal | None
     wastage_quantity: Decimal
     available: Decimal | None = None
+    kind: str | None = None
+    taken_quantity: Decimal = Decimal("0")
+    held_quantity: Decimal = Decimal("0")
 
 
 class ProductionJobRead(BaseModel):
@@ -144,6 +233,9 @@ class ProductionJobRead(BaseModel):
     assigned_user_name: str | None = None
     stages_done: int = 0
     stages_total: int = 0
+    good_quantity: Decimal = Decimal("0")
+    scrap_quantity: Decimal = Decimal("0")
+    problem_reason: str | None = None
 
 
 class ProductionJobDetail(ProductionJobRead):
@@ -154,3 +246,7 @@ class ProductionJobDetail(ProductionJobRead):
     created_by_name: str | None = None
     events: list[JobEvent] = Field(default_factory=list)
     variances: list[VarianceRead] = Field(default_factory=list)
+    sheets_held: Decimal = Decimal("0")
+    sheets_taken: Decimal = Decimal("0")
+    remnant_returned: Decimal = Decimal("0")
+    pieces_here: Decimal = Decimal("0")

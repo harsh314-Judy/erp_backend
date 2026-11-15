@@ -10,10 +10,14 @@ from sqlmodel import select
 
 from app.api.routes.department.department_model import DepartmentWorker, WorkerDepartmentHistory
 from app.api.routes.department.department_schemas import (
+    AssignedDepartment,
     DepartmentActive,
     DepartmentInput,
+    DepartmentMachine,
     DepartmentRead,
     DepartmentRecent,
+    DeskSend,
+    OutsideOpen,
     UnitTotal,
     WorkerCount,
     WorkerPatch,
@@ -22,7 +26,7 @@ from app.api.routes.department.department_schemas import (
 )
 from app.api.routes.floor.floor_aggregate import FloorFact, department_rollup, people_rollup
 from app.api.routes.floor.floor_model import FloorEntry, FloorEntryWorker
-from app.api.routes.operation.operation_model import Operation
+from app.api.routes.operation.operation_model import Operation, UserOperation
 from app.api.routes.product.product_model import Product
 from app.api.routes.production.production_model import (
     ProductionJob,
@@ -55,14 +59,14 @@ class DepartmentService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def list_workers(self, *, include_inactive: bool, reveal: bool) -> list[WorkerRead]:
+    async def list_workers(self, *, include_inactive: bool, reveal: bool, wages: bool = False) -> list[WorkerRead]:
         query = select(DepartmentWorker, Operation.name).join(Operation, Operation.id == DepartmentWorker.operation_id)
         if not include_inactive:
             query = query.where(DepartmentWorker.active.is_(True))
         rows = await self.session.execute(query.order_by(DepartmentWorker.name))
-        return [_worker_read(worker, name, reveal) for worker, name in rows]
+        return [_worker_read(worker, name, reveal, wages) for worker, name in rows]
 
-    async def add_worker(self, operation_id: UUID, data: WorkerWrite, *, reveal: bool) -> WorkerRead:
+    async def add_worker(self, operation_id: UUID, data: WorkerWrite, *, reveal: bool, wages: bool = False) -> WorkerRead:
         operation = await get_or_404(self.session, Operation, operation_id)
         name = data.name.strip()
         if not name:
@@ -72,12 +76,14 @@ class DepartmentService:
             existing.active = True
             existing.name = name
             self._apply_profile(existing, data)
+            _apply_wages(existing, data.wage_kind, data.wage_amount, wages)
             self.session.add(existing)
             await self._ensure_history(existing)
             await commit_or_conflict(self.session)
-            return _worker_read(existing, operation.name, reveal)
+            return _worker_read(existing, operation.name, reveal, wages)
         row = DepartmentWorker(operation_id=operation_id, name=name, active=True)
         self._apply_profile(row, data)
+        _apply_wages(row, data.wage_kind, data.wage_amount, wages)
         self.session.add(row)
         await self.session.flush()
         self.session.add(
@@ -85,9 +91,9 @@ class DepartmentService:
         )
         await commit_or_conflict(self.session)
         await self.session.refresh(row)
-        return _worker_read(row, operation.name, reveal)
+        return _worker_read(row, operation.name, reveal, wages)
 
-    async def update_worker(self, worker_id: UUID, data: WorkerPatch, *, reveal: bool) -> WorkerRead:
+    async def update_worker(self, worker_id: UUID, data: WorkerPatch, *, reveal: bool, wages: bool = False) -> WorkerRead:
         row = await get_or_404(self.session, DepartmentWorker, worker_id)
         changes = data.model_dump(exclude_unset=True)
         target_operation = changes.get("operation_id", row.operation_id)
@@ -108,10 +114,25 @@ class DepartmentService:
         for key in ("phone", "address", "emergency_contact_name", "emergency_contact_phone"):
             if key in changes:
                 setattr(row, key, _blank(changes[key]))
+        if wages:
+            _apply_wages(row, changes.get("wage_kind"), changes.get("wage_amount") if "wage_amount" in changes else None, True)
         self.session.add(row)
         await commit_or_conflict(self.session)
         operation = await get_or_404(self.session, Operation, row.operation_id)
-        return _worker_read(row, operation.name, reveal)
+        return _worker_read(row, operation.name, reveal, wages)
+
+    async def assigned(self, user_id: UUID) -> list[AssignedDepartment]:
+        rows = (
+            await self.session.execute(
+                select(Operation)
+                .join(UserOperation, UserOperation.operation_id == Operation.id)
+                .where(UserOperation.user_id == user_id)
+                .order_by(Operation.name)
+            )
+        ).scalars()
+        found = list(rows)
+        found.sort(key=lambda item: (_ROUTE.index(item.name.lower()) if item.name.lower() in _ROUTE else 99, item.name))
+        return [AssignedDepartment(operation_id=row.id, name=row.name) for row in found]
 
     async def overview(
         self,
@@ -119,6 +140,7 @@ class DepartmentService:
         date_to: date | None,
         *,
         reveal: bool,
+        wages: bool = False,
     ) -> list[DepartmentRead]:
         start = date_from or (_today() - timedelta(days=6))
         end = date_to or _today()
@@ -128,21 +150,29 @@ class DepartmentService:
         operations.sort(
             key=lambda item: (_ROUTE.index(item.name.lower()) if item.name.lower() in _ROUTE else 99, item.name)
         )
+        from app.api.routes.machine.machine_model import Machine
+
         workers = list(await self.session.scalars(select(DepartmentWorker).order_by(DepartmentWorker.name)))
+        machines = list(await self.session.scalars(select(Machine).order_by(Machine.name)))
+        machine_names = {row.id: row.name for row in machines}
         active_rows = (
             await self.session.execute(
-                select(ProductionJobStage, ProductionJob, Product.product_name)
+                select(ProductionJobStage, ProductionJob, Product.product_name, Product.quantity_per_bundle)
                 .join(ProductionJob, ProductionJob.id == ProductionJobStage.job_id)
                 .outerjoin(Product, Product.id == ProductionJob.product_id)
-                .where(ProductionJobStage.status == "active", ProductionJob.status == "in_progress")
+                .where(
+                    ProductionJobStage.status == "active",
+                    ProductionJob.status.in_(("in_progress", "pending")),
+                )
             )
         ).all()
-        job_ids = {job.id for _, job, _ in active_rows}
+        job_ids = {job.id for _, job, _, _ in active_rows}
         inputs = await self._inputs(job_ids)
+        sends_by_stage = await self._open_sends([stage.id for stage, _, _, _ in active_rows])
         by_operation: dict[UUID, DepartmentRead] = {}
         for operation in operations:
             people = [
-                _worker_read(row, operation.name, reveal)
+                _worker_read(row, operation.name, reveal, wages)
                 for row in workers
                 if row.operation_id == operation.id and row.active
             ]
@@ -150,22 +180,52 @@ class DepartmentService:
                 operation_id=operation.id,
                 name=operation.name,
                 workers=people,
+                machines=[
+                    DepartmentMachine(id=row.id, name=row.name, status=row.status, note=row.note)
+                    for row in machines
+                    if row.operation_id == operation.id
+                ],
                 active=[],
                 recent=[],
                 per_worker=[],
             )
-        for stage, job, product_name in active_rows:
+        for stage, job, product_name, bundle in active_rows:
             bucket = by_operation.get(stage.operation_id)
             if bucket is None:
                 continue
+            good = Decimal(stage.good_quantity or 0)
+            scrap = Decimal(stage.scrap_quantity or 0)
+            sends = sends_by_stage.get(stage.id, [])
+            outside_qty = sum((row.still_out for row in sends if row.still_out > 0), Decimal("0"))
+            remaining = Decimal(job.quantity) - good - outside_qty
+            if remaining < 0:
+                remaining = Decimal("0")
             bucket.active.append(
                 DepartmentActive(
                     job_id=job.id,
+                    stage_id=stage.id,
                     product_name=product_name,
                     quantity=job.quantity,
+                    good_quantity=good,
+                    scrap_quantity=scrap,
+                    remaining=remaining,
+                    job_status=job.status,
+                    problem_reason=stage.problem_reason,
+                    problem_note=stage.problem_note,
+                    problem_machine_name=machine_names.get(stage.problem_machine_id),
+                    worker_name=stage.worker_name,
+                    bundle_size=bundle,
                     started_at=stage.started_at,
                     due_at=job.due_at,
                     inputs=inputs.get(job.id, []),
+                    allows_send_out=bool(stage.allows_send_out),
+                    standard_scrap_percent=stage.standard_scrap_percent,
+                    outside=[
+                        OutsideOpen(supplier_name=row.supplier_name, quantity=row.still_out)
+                        for row in sends
+                        if row.still_out > 0
+                    ],
+                    sends=sends,
                 )
             )
         entries = list(
@@ -209,6 +269,8 @@ class DepartmentService:
                     worker_name=", ".join(labels),
                     product_name=entry.output_name,
                     quantity=entry.output_quantity,
+                    scrap_quantity=entry.scrap_quantity,
+                    notes=entry.notes,
                     unit=entry.output_unit,
                     completed_at=entry.created_at,
                     shared=len(people) > 1,
@@ -256,20 +318,60 @@ class DepartmentService:
             if product_ids
             else {}
         )
-        material_names = (
+        materials = (
             {
-                row.id: row.name
+                row.id: row
                 for row in await self.session.scalars(select(RawMaterial).where(RawMaterial.id.in_(material_ids)))  # type: ignore[attr-defined]
             }
             if material_ids
             else {}
         )
         for row in material_rows:
-            name = product_names.get(row.product_id) if row.product_id else material_names.get(row.raw_material_id)
+            material = materials.get(row.raw_material_id) if row.raw_material_id else None
+            name = product_names.get(row.product_id) if row.product_id else (material.name if material else None)
             inputs.setdefault(row.job_id, []).append(
-                DepartmentInput(item_name=name or "Item", planned_quantity=row.planned_quantity)
+                DepartmentInput(
+                    input_id=row.id,
+                    item_name=name or "Item",
+                    planned_quantity=row.planned_quantity,
+                    kind=material.kind if material else ("product" if row.product_id else None),
+                    taken_quantity=row.taken_quantity,
+                )
             )
         return inputs
+
+    async def _open_sends(self, stage_ids: list[UUID]) -> dict[UUID, list[DeskSend]]:
+        if not stage_ids:
+            return {}
+        from app.api.routes.production.production_model import StageSend
+        from app.api.routes.supplier.supplier_model import Supplier
+
+        rows = list(await self.session.scalars(select(StageSend).where(StageSend.stage_id.in_(stage_ids))))  # type: ignore[attr-defined]
+        supplier_ids = {row.supplier_id for row in rows}
+        names = (
+            {
+                row.id: row.supplier_company_name
+                for row in await self.session.scalars(select(Supplier).where(Supplier.id.in_(supplier_ids)))  # type: ignore[attr-defined]
+            }
+            if supplier_ids
+            else {}
+        )
+        grouped: dict[UUID, list[DeskSend]] = {}
+        for row in rows:
+            still = Decimal(row.quantity) - Decimal(row.good_quantity or 0) - Decimal(row.rejected_quantity or 0)
+            grouped.setdefault(row.stage_id, []).append(
+                DeskSend(
+                    id=row.id,
+                    supplier_id=row.supplier_id,
+                    supplier_name=names.get(row.supplier_id, "Vendor"),
+                    quantity=row.quantity,
+                    sent_on=row.sent_on,
+                    good_quantity=row.good_quantity,
+                    rejected_quantity=row.rejected_quantity,
+                    still_out=still,
+                )
+            )
+        return grouped
 
     def _apply_profile(self, row: DepartmentWorker, data: WorkerWrite) -> None:
         row.phone = _blank(data.phone)
@@ -313,7 +415,16 @@ class DepartmentService:
         )
 
 
-def _worker_read(row: DepartmentWorker, operation_name: str, reveal: bool) -> WorkerRead:
+def _apply_wages(row: DepartmentWorker, kind: str | None, amount: Decimal | None, wages: bool) -> None:
+    if not wages:
+        return
+    if kind:
+        row.wage_kind = kind
+    if amount is not None:
+        row.wage_amount = amount
+
+
+def _worker_read(row: DepartmentWorker, operation_name: str, reveal: bool, wages: bool = False) -> WorkerRead:
     return WorkerRead(
         id=row.id,
         operation_id=row.operation_id,
@@ -325,4 +436,6 @@ def _worker_read(row: DepartmentWorker, operation_name: str, reveal: bool) -> Wo
         address=row.address if reveal else None,
         emergency_contact_name=row.emergency_contact_name if reveal else None,
         emergency_contact_phone=row.emergency_contact_phone if reveal else None,
+        wage_kind=row.wage_kind if wages else None,
+        wage_amount=row.wage_amount if wages else None,
     )

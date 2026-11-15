@@ -69,10 +69,15 @@ async def list_materials(
     user: CurrentUserDep,
     q: str | None = None,
     brief: bool = False,
+    remnants: bool = False,
 ) -> PaginatedResponse[RawMaterialRead]:
     role_name = await _role(session, user, VIEW_INVENTORY)
     return await service.list_materials(
-        pagination, query=q, show_prices=can_see_prices(role_name), brief=brief
+        pagination,
+        query=q,
+        show_prices=can_see_prices(role_name),
+        brief=brief,
+        remnants=remnants,
     )
 
 
