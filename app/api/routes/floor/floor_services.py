@@ -165,7 +165,7 @@ class FloorService:
 
     async def create_entry(self, data: FloorEntryWrite, actor: User) -> FloorEntryRead:
         workers = await self._require_workers(data.worker_ids)
-        await get_or_404(self.session, Operation, data.operation_id)
+        operation = await get_or_404(self.session, Operation, data.operation_id)
         entry = FloorEntry(
             entry_date=data.entry_date,
             operation_id=data.operation_id,
@@ -175,6 +175,17 @@ class FloorService:
         self.session.add(entry)
         await self.session.flush()
         self._attach(entry, workers)
+        from app.api.routes.activity.activity_services import record_activity
+
+        await record_activity(
+            self.session,
+            kind="floor",
+            summary=f"Floor entry in {operation.name}",
+            ref_type="floor_entry",
+            ref_id=entry.id,
+            actor_id=actor.id,
+            link=f"/departments/{entry.operation_id}/now",
+        )
         await commit_or_conflict(self.session)
         await self.session.refresh(entry)
         return (await self._reads([entry]))[0]

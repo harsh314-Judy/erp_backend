@@ -5,6 +5,7 @@ from sqlalchemy import or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
+from app.api.routes.activity.activity_services import record_activity
 from app.api.routes.attendance.attendance_model import Attendance
 from app.api.routes.attendance.attendance_schemas import AttendanceRead
 from app.api.routes.user.user_model import Role, User
@@ -37,6 +38,15 @@ async def open_attendance(session: AsyncSession, user: User) -> None:
             signed_in_at=now,
         )
     )
+    await record_activity(
+        session,
+        kind="attendance",
+        summary=f"{_person(user)} signed in",
+        ref_type="attendance",
+        ref_id=user.id,
+        actor_id=user.id,
+        link="/activity",
+    )
 
 
 async def close_attendance(session: AsyncSession, user: User) -> None:
@@ -50,6 +60,16 @@ async def close_attendance(session: AsyncSession, user: User) -> None:
     for row in rows:
         row.signed_out_at = now
         session.add(row)
+    if rows:
+        await record_activity(
+            session,
+            kind="attendance",
+            summary=f"{_person(user)} signed out",
+            ref_type="attendance",
+            ref_id=user.id,
+            actor_id=user.id,
+            link="/activity",
+        )
 
 
 async def month_attendance(session: AsyncSession, year: int, month: int) -> list[AttendanceRead]:

@@ -1,13 +1,14 @@
 from uuid import UUID
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import Response
 
 from app.api.db_dependency import PGSessionDep
 from app.api.dependencies import AttachmentServiceDep, CurrentUserDep, InvoiceServiceDep
+from app.api.routes.invoice.invoice_model import Payment
 from app.api.routes.invoice.invoice_schemas import InvoiceRead, PaymentCreate
 from app.api.routes.user.user_model import Role
-from app.api.security.permissions import MANAGE_SALES, forbid, role_has
+from app.api.security.permissions import MANAGE_SALES, VIEW_FINANCIALS, forbid, role_has
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
 
@@ -64,3 +65,21 @@ async def add_payment(
 ) -> InvoiceRead:
     await _sales(session, user)
     return await service.add_payment(invoice_id, data, user)
+
+
+@router.post("/{invoice_id}/payments/{payment_id}/photo", status_code=status.HTTP_204_NO_CONTENT)
+async def replace_invoice_payment_photo(
+    invoice_id: UUID,
+    payment_id: UUID,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+    attachments: AttachmentServiceDep,
+    file: UploadFile = File(...),
+) -> None:
+    role = await session.get(Role, user.role_id)
+    if not role_has(role.role_name if role else None, VIEW_FINANCIALS):
+        forbid()
+    payment = await session.get(Payment, payment_id)
+    if payment is None or payment.invoice_id != invoice_id:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    await attachments.replace_linked_photo(session, payment, file, user)

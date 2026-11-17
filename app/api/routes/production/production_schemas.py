@@ -127,6 +127,9 @@ class InputActual(BaseModel):
 class JobApprove(BaseModel):
     produced_quantity: Decimal = Field(ge=0)
     inputs: list[InputActual]
+    note: str = ""
+    staff_name: str = ""
+    area: str | None = None
 
 
 class JobCancel(BaseModel):

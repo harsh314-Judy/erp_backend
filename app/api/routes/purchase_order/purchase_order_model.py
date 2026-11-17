@@ -69,6 +69,7 @@ class PurchaseOrder(Entity, table=True):
     receipt_fail_note: str | None = Field(default=None, sa_type=Text, nullable=True)
     challan_number: str | None = Field(default=None, max_length=80, nullable=True)
     challan_note: str | None = Field(default=None, sa_type=Text, nullable=True)
+    amount_paid: Decimal = Field(default=Decimal("0"), sa_type=Numeric(12, 2), nullable=False)
 
 
 class PurchaseOrderLine(Entity, table=True):
@@ -89,6 +90,21 @@ class PurchaseOrderLine(Entity, table=True):
     )
     quantity: Decimal = Field(sa_type=Numeric(14, 3), nullable=False)
     unit_price: Decimal = Field(sa_type=Numeric(12, 2), nullable=False)
+
+
+class PurchasePayment(Entity, table=True):
+    __tablename__ = "purchase_payments"
+
+    purchase_order_id: UUID = Field(
+        foreign_key="purchase_orders.id", nullable=False, index=True, ondelete="CASCADE"
+    )
+    amount: Decimal = Field(sa_type=Numeric(12, 2), nullable=False)
+    method: str = Field(max_length=16, nullable=False)
+    note: str | None = Field(default=None, sa_type=Text, nullable=True)
+    attachment_id: UUID = Field(foreign_key="attachments.id", nullable=False)
+    recorded_by_user_id: UUID | None = Field(
+        default=None, foreign_key="users.id", nullable=True, ondelete="SET NULL"
+    )
 
 
 class PurchaseOrderAttachment(Entity, table=True):

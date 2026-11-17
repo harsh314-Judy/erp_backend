@@ -94,6 +94,8 @@ class SalesOrderService:
                       ), '[]'::json) AS lines,
                       i.id AS invoice_id,
                       (i.pdf_attachment_id IS NOT NULL) AS invoice_has_pdf,
+                      i.total_amount AS invoice_total,
+                      i.amount_paid AS invoice_amount_paid,
                       o.updated_at
                     FROM sales_orders o
                     LEFT JOIN customers c ON c.id = o.customer_id
@@ -138,6 +140,8 @@ class SalesOrderService:
                     ],
                     invoice_id=row["invoice_id"],
                     invoice_has_pdf=bool(row["invoice_has_pdf"]),
+                    invoice_total=row["invoice_total"] if show_prices else None,
+                    invoice_amount_paid=row["invoice_amount_paid"] if show_prices else None,
                     updated_at=row["updated_at"],
                 )
             )
@@ -371,6 +375,17 @@ class SalesOrderService:
             await self._notify_dispatched(order, actor)
         order.status = target
         self.session.add(order)
+        from app.api.routes.activity.activity_services import record_activity
+
+        await record_activity(
+            self.session,
+            kind="sold_goods" if target == "delivered" else "dispatches",
+            summary=f"Sales order marked {target.replace('_', ' ')}",
+            ref_type="sales_order",
+            ref_id=order.id,
+            actor_id=actor.id,
+            link="/sales",
+        )
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices)
 
@@ -514,6 +529,8 @@ class SalesOrderService:
             lines=rendered,
             invoice_id=invoice.id if invoice else None,
             invoice_has_pdf=bool(invoice and invoice.pdf_attachment_id),
+            invoice_total=invoice.total_amount if invoice and show_prices else None,
+            invoice_amount_paid=invoice.amount_paid if invoice and show_prices else None,
             updated_at=order.updated_at,
         )
         return (await self._with_flags([built]))[0]

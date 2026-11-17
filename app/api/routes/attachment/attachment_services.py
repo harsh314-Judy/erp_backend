@@ -46,6 +46,29 @@ class AttachmentService:
         await session.refresh(row)
         return row
 
+    async def replace_linked_photo(self, session, owner, file: UploadFile, actor: User) -> Attachment:
+        content_type = file.content_type or ""
+        if content_type not in media_settings.allowed_image_types:
+            raise HTTPException(status_code=400, detail="Choose a photo")
+        old_id = owner.attachment_id
+        stored = await self.upload(session, file, actor)
+        owner.attachment_id = stored.id
+        session.add(owner)
+        await commit_or_conflict(session)
+        if old_id and old_id != stored.id:
+            old = await session.get(Attachment, old_id)
+            if old is not None:
+                await self._delete_object(old.object_key)
+                await session.delete(old)
+                await commit_or_conflict(session)
+        return stored
+
+    async def _delete_object(self, key: str) -> None:
+        try:
+            await self.client.delete_object(Bucket=db_settings.GARAGE_BUCKET_NAME, Key=key)
+        except (BotoCoreError, ClientError):
+            return
+
     async def store_bytes(
         self,
         session,

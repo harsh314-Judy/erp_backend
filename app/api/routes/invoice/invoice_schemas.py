@@ -82,6 +82,7 @@ class InvoiceRead(BaseModel):
     sales_order_id: UUID
     customer_id: UUID
     number: str
+    customer_name: str | None = None
     status: str
     same_state: bool
     taxable_amount: Decimal
