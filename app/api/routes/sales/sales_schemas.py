@@ -87,6 +87,8 @@ class SalesOrderRead(BaseModel):
     lines: list[SalesOrderLineRead]
     invoice_id: UUID | None = None
     invoice_has_pdf: bool = False
+    invoice_total: Decimal | None = None
+    invoice_amount_paid: Decimal | None = None
     updated_at: datetime | None = None
     job_due_at: datetime | None = None
     blocked_material: bool = False

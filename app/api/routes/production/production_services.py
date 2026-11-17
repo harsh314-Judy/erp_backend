@@ -628,7 +628,26 @@ class ProductionService:
         job.status = next_status(job.status, "approve")
         job.produced_quantity = qty(data.produced_quantity)
         job.completed_at = _now()
+        parts = [f"Approved by {_person(actor)}"]
+        if data.staff_name.strip():
+            parts.append(f"staff {data.staff_name.strip()}")
+        if data.area and data.area.strip():
+            parts.append(f"area {data.area.strip()}")
+        if data.note.strip():
+            parts.append(data.note.strip())
+        self._append_event(job, actor, "approved", None, " · ".join(parts))
         self.session.add(job)
+        from app.api.routes.activity.activity_services import record_activity
+
+        await record_activity(
+            self.session,
+            kind="job_approvals",
+            summary=f"Approved {qty(data.produced_quantity)} into stock",
+            ref_type="production_job",
+            ref_id=job.id,
+            actor_id=actor.id,
+            link="/accountant/jobs",
+        )
         await self._notify_job_closed(job, actor, finished=True)
         await commit_or_conflict(self.session)
         return await self._detail(job)

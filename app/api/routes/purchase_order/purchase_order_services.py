@@ -8,7 +8,7 @@ from app.api.routes.user.user_model import User
 from app.db.repository import commit_or_conflict
 
 ORDER_STATUSES = {"initiated", "process", "in_delivery", "delivered", "cancelled"}
-SLIP_KINDS = {"dispatch_slip", "received_slip", "cargo_photo"}
+SLIP_KINDS = {"dispatch_slip", "received_slip", "cargo_photo", "vehicle_plate", "supplier_invoice"}
 
 from app.api.routes.purchase_order.purchase_order_model import (
     PurchaseOrderProduct,
@@ -182,6 +182,7 @@ class PurchaseFlowService:
                 await self._apply_receipt(order, actor)
                 order.stock_received = True
                 self.session.add(order)
+                await self._note_received(order, actor)
                 await self._notify_purchase(order, actor, arriving=False)
             if order.status == "in_delivery":
                 await self._notify_purchase(order, actor, arriving=True)
@@ -233,6 +234,7 @@ class PurchaseFlowService:
                 order.stock_received = True
                 order.receipt_fail_reason = None
                 order.receipt_fail_note = None
+                await self._note_received(order, actor)
                 await self._notify_purchase(order, actor, arriving=False)
             if status == "in_delivery" and order.status != "in_delivery":
                 await self._notify_purchase(order, actor, arriving=True)
@@ -268,6 +270,7 @@ class PurchaseFlowService:
         order.receipt_fail_reason = None
         order.receipt_fail_note = None
         self.session.add(order)
+        await self._note_received(order, actor)
         await self._notify_purchase(order, actor, arriving=False)
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices=True, staff_view=False)
@@ -305,6 +308,7 @@ class PurchaseFlowService:
         order.stock_received = True
         order.status = "verified"
         self.session.add(order)
+        await self._note_received(order, actor)
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices=True, staff_view=False)
 
@@ -315,7 +319,7 @@ class PurchaseFlowService:
         order = await get_or_404(self.session, PurchaseOrder, order_id)
         kind = str(payload.get("kind") or "")
         if kind not in SLIP_KINDS:
-            raise HTTPException(status_code=400, detail="Slip kind must be a dispatch slip, received slip, or cargo photo")
+            raise HTTPException(status_code=400, detail="That photo kind is not recognised")
         stored = await self.session.get(Attachment, payload.get("attachment_id"))
         if stored is None:
             raise HTTPException(status_code=400, detail="That file was not uploaded")
@@ -323,6 +327,76 @@ class PurchaseFlowService:
         self.session.add(link)
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices=True, staff_view=False)
+
+    async def add_payment(self, order_id: UUID, data, actor: User) -> dict:
+        from decimal import Decimal
+
+        from app.api.routes.activity.activity_services import record_activity
+        from app.api.routes.attachment.attachment_model import Attachment
+        from app.api.routes.purchase_order.purchase_order_model import (
+            PurchaseOrder,
+            PurchaseOrderLine,
+            PurchasePayment,
+        )
+
+        if data.method not in {"cash", "upi", "bank"}:
+            raise HTTPException(status_code=400, detail="Payment method must be cash, upi, or bank")
+        if data.attachment_id is None:
+            raise HTTPException(status_code=400, detail="A photo of the payment is required")
+        order = await get_or_404(self.session, PurchaseOrder, order_id)
+        if not order.stock_received:
+            raise HTTPException(status_code=409, detail="Receive the goods before recording a payment")
+        stored = await self.session.get(Attachment, data.attachment_id)
+        if stored is None:
+            raise HTTPException(status_code=400, detail="Payment photo was not found")
+        lines = list(
+            await self.session.scalars(
+                select(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id == order.id)
+            )
+        )
+        total = sum((line.quantity * line.unit_price for line in lines), Decimal("0"))
+        amount = Decimal(str(data.amount)).quantize(Decimal("0.01"))
+        if order.amount_paid + amount > total + Decimal("0.009"):
+            raise HTTPException(status_code=400, detail="That installment is more than the amount still due")
+        self.session.add(
+            PurchasePayment(
+                purchase_order_id=order.id,
+                amount=amount,
+                method=data.method,
+                note=data.note,
+                attachment_id=data.attachment_id,
+                recorded_by_user_id=actor.id,
+            )
+        )
+        order.amount_paid = (order.amount_paid + amount).quantize(Decimal("0.01"))
+        self.session.add(order)
+        await record_activity(
+            self.session,
+            kind="payments",
+            summary=f"Supplier payment {amount} by {data.method}",
+            ref_type="purchase_order",
+            ref_id=order.id,
+            actor_id=actor.id,
+            link="/accountant/payments",
+        )
+        await commit_or_conflict(self.session)
+        return await self._read(order, show_prices=True, staff_view=False)
+
+    async def _note_received(self, order, actor: User) -> None:
+        from app.api.routes.activity.activity_services import record_activity
+        from app.api.routes.supplier.supplier_model import Supplier
+
+        supplier = await self.session.get(Supplier, order.supplier_id)
+        company = supplier.supplier_company_name if supplier else "Supplier"
+        await record_activity(
+            self.session,
+            kind="purchases",
+            summary=f"Received goods from {company}",
+            ref_type="purchase_order",
+            ref_id=order.id,
+            actor_id=actor.id,
+            link="/purchases",
+        )
 
     async def remove_attachment(self, order_id: UUID, link_id: UUID) -> dict:
         from app.api.routes.purchase_order.purchase_order_model import PurchaseOrder, PurchaseOrderAttachment
@@ -344,7 +418,7 @@ class PurchaseFlowService:
         for item in attachments:
             kind = str(item.get("kind") or "")
             if kind not in SLIP_KINDS:
-                raise HTTPException(status_code=400, detail="Slip kind must be a dispatch slip, received slip, or cargo photo")
+                raise HTTPException(status_code=400, detail="That photo kind is not recognised")
             stored = await self.session.get(Attachment, item.get("attachment_id"))
             if stored is None:
                 raise HTTPException(status_code=400, detail="That file was not uploaded")
@@ -361,10 +435,11 @@ class PurchaseFlowService:
             )
         )
         kinds = {row.kind for row in rows}
-        if "received_slip" not in kinds or "cargo_photo" not in kinds:
+        invoice = "supplier_invoice" in kinds or "received_slip" in kinds
+        if "vehicle_plate" not in kinds or "cargo_photo" not in kinds or not invoice:
             raise HTTPException(
                 status_code=400,
-                detail="Upload the received slip and a photo of the unloaded cargo before stocking",
+                detail="Upload the licence plate, the unloaded shipment, and the supplier invoice before stocking",
             )
 
     async def _notify_purchase(self, order, actor, *, arriving: bool) -> None:
@@ -506,7 +581,7 @@ class PurchaseFlowService:
 
     async def _read_many(self, orders, *, show_prices: bool, staff_view: bool) -> list[dict]:
         from app.api.routes.product.product_model import Product
-        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrderLine
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrderLine, PurchasePayment
         from app.api.routes.raw_material.raw_material_model import RawMaterial
         from app.api.routes.supplier.supplier_model import Supplier
 
@@ -516,6 +591,23 @@ class PurchaseFlowService:
         from app.api.routes.purchase_order.purchase_order_model import PurchaseOrderAttachment
 
         order_ids = [order.id for order in orders]
+        pay_rows = list(
+            await self.session.scalars(
+                select(PurchasePayment).where(PurchasePayment.purchase_order_id.in_(order_ids))  # type: ignore[attr-defined]
+            )
+        )
+        pay_grouped: dict = {order.id: [] for order in orders}
+        for row in pay_rows:
+            pay_grouped[row.purchase_order_id].append(
+                {
+                    "id": row.id,
+                    "amount": row.amount,
+                    "method": row.method,
+                    "note": row.note,
+                    "attachment_id": row.attachment_id,
+                    "created_at": row.created_at,
+                }
+            )
         links = list(
             await self.session.scalars(
                 select(PurchaseOrderAttachment).where(PurchaseOrderAttachment.purchase_order_id.in_(order_ids))  # type: ignore[attr-defined]
@@ -595,6 +687,8 @@ class PurchaseFlowService:
                     "receipt_attachment_id": order.receipt_attachment_id,
                     "attachments": files.get(order.id, []),
                     "lines": grouped.get(order.id, []),
+                    "amount_paid": order.amount_paid if show_prices and not staff_view else "0",
+                    "payments": pay_grouped.get(order.id, []) if show_prices and not staff_view else [],
                 }
             )
         return presented

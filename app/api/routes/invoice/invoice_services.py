@@ -106,8 +106,13 @@ class InvoiceService:
         return [await self._read(row) for row in rows]
 
     async def add_payment(self, invoice_id: UUID, data: PaymentCreate, actor: User) -> InvoiceRead:
-        if data.method not in {"cash", "online"}:
-            raise HTTPException(status_code=400, detail="Payment method must be cash or online")
+        if data.method not in {"cash", "upi", "bank"}:
+            raise HTTPException(status_code=400, detail="Payment method must be cash, upi, or bank")
+        if data.attachment_id is None:
+            raise HTTPException(status_code=400, detail="A photo of the payment is required")
+        stored = await self.session.get(Attachment, data.attachment_id)
+        if stored is None:
+            raise HTTPException(status_code=400, detail="Payment photo was not found")
         invoice = await get_or_404(self.session, Invoice, invoice_id)
         payment = Payment(
             invoice_id=invoice.id,
@@ -126,6 +131,17 @@ class InvoiceService:
         else:
             invoice.status = "paid"
         self.session.add(invoice)
+        from app.api.routes.activity.activity_services import record_activity
+
+        await record_activity(
+            self.session,
+            kind="payments",
+            summary=f"Customer payment {payment.amount} by {payment.method}",
+            ref_type="invoice",
+            ref_id=invoice.id,
+            actor_id=actor.id,
+            link="/accountant/payments",
+        )
         await commit_or_conflict(self.session)
         return await self._read(invoice)
 
@@ -151,11 +167,13 @@ class InvoiceService:
         payments = list(
             await self.session.scalars(select(Payment).where(Payment.invoice_id == invoice.id))
         )
+        customer = await self.session.get(Customer, invoice.customer_id)
         return InvoiceRead.model_validate(invoice).model_copy(
             update={
                 "lines": lines,
                 "payments": [PaymentRead.model_validate(row) for row in payments],
                 "has_pdf": invoice.pdf_attachment_id is not None,
+                "customer_name": customer.name if customer else None,
             }
         )
 

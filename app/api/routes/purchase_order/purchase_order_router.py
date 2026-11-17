@@ -1,13 +1,17 @@
 from uuid import UUID
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from app.api.db_dependency import PGSessionDep
-from app.api.dependencies import CurrentUserDep, PurchaseFlowServiceDep, PurchaseOrderServiceDep
+from app.api.dependencies import AttachmentServiceDep, CurrentUserDep, PurchaseFlowServiceDep, PurchaseOrderServiceDep
 from app.api.routes.user.user_model import Role
+from app.api.routes.invoice.invoice_schemas import PaymentCreate
+from app.api.routes.purchase_order.purchase_order_model import PurchasePayment
 from app.api.security.permissions import (
+    APPROVE_JOBS,
     MANAGE_PURCHASING,
     VIEW_ASSIGNED_WORK,
+    VIEW_FINANCIALS,
     can_see_prices,
     forbid,
     role_has,
@@ -207,6 +211,38 @@ async def update_purchase_order(
     if not role_has(name, MANAGE_PURCHASING):
         forbid()
     return await service.update_order(order_id, data, user)
+
+
+@router.post("/purchase-orders/{order_id}/payments")
+async def add_purchase_payment(
+    order_id: UUID,
+    data: PaymentCreate,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, APPROVE_JOBS):
+        forbid()
+    return await service.add_payment(order_id, data, user)
+
+
+@router.post("/purchase-orders/{order_id}/payments/{payment_id}/photo", status_code=status.HTTP_204_NO_CONTENT)
+async def replace_purchase_payment_photo(
+    order_id: UUID,
+    payment_id: UUID,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+    attachments: AttachmentServiceDep,
+    file: UploadFile = File(...),
+) -> None:
+    name = await _purchase_role(session, user)
+    if not role_has(name, VIEW_FINANCIALS):
+        forbid()
+    payment = await session.get(PurchasePayment, payment_id)
+    if payment is None or payment.purchase_order_id != order_id:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    await attachments.replace_linked_photo(session, payment, file, user)
 
 
 @router.post("/purchase-orders/{order_id}/inspect")
