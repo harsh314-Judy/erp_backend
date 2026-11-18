@@ -56,7 +56,12 @@ class PurchaseOrderLineWrite(BaseModel):
     product_id: UUID | None = None
     raw_material_id: UUID | None = None
     quantity: Decimal = Field(gt=0)
-    unit_price: Decimal = Field(ge=0)
+    unit_price: Decimal = Field(default=Decimal("0"), ge=0)
+    purchase_rate: Decimal | None = Field(default=None, ge=0)
+    selling_rate: Decimal | None = Field(default=None, ge=0)
+    gst: bool = False
+    gst_percent: int = Field(default=0, ge=0, le=100)
+    measurement_unit_id: UUID | None = None
 
 
 class ReceiptInspect(BaseModel):
@@ -73,6 +78,11 @@ class PurchaseOrderUpdate(BaseModel):
     challan_number: str | None = Field(default=None, max_length=80)
     challan_note: str | None = None
     lines: list[PurchaseOrderLineWrite] | None = None
+    cancel_reason: str | None = Field(default=None, max_length=500)
+
+
+class PurchaseCancel(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class PurchaseOrderProductRead(BaseModel):

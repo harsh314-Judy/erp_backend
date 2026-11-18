@@ -1,11 +1,16 @@
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RawMaterialCategoryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=150)
+
+
+class RawMaterialCategoryUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=150)
 
 
 class RawMaterialCategoryRead(BaseModel):
@@ -13,6 +18,20 @@ class RawMaterialCategoryRead(BaseModel):
 
     id: UUID
     name: str
+    expires_at: datetime | None = None
+
+
+class ReplaceRequest(BaseModel):
+    replacement_id: UUID | None = None
+    temporary_name: str | None = Field(default=None, min_length=1, max_length=150)
+
+    @model_validator(mode="after")
+    def one_choice(self):
+        has_existing = self.replacement_id is not None
+        has_temporary = bool(self.temporary_name and self.temporary_name.strip())
+        if has_existing == has_temporary:
+            raise ValueError("Choose an existing item or a temporary name")
+        return self
 
 
 class RawMaterialCreate(BaseModel):

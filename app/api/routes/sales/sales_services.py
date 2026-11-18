@@ -247,6 +247,18 @@ class SalesOrderService:
             if packaging is not None:
                 managers = await users_for_operation(self.session, packaging.id)
                 packaging_user_id = managers[0] if managers else None
+        mode = (data.transport_mode or "").strip().lower()
+        if mode not in {"truck", "handcart", "staff_vehicle"}:
+            raise HTTPException(status_code=400, detail="Choose truck, hand cart, or staff pickup")
+        driver = (data.driver_name or "").strip() or None
+        phone = (data.carrier_phone or "").strip() or None
+        plate = (data.vehicle_plate or "").strip().upper() or None
+        if mode == "truck" and (not plate or not driver):
+            raise HTTPException(status_code=400, detail="A truck needs the licence plate and the driver's name")
+        if mode == "handcart" and (not driver or not phone):
+            raise HTTPException(status_code=400, detail="A hand cart needs the person's name and phone")
+        if mode == "staff_vehicle" and not data.pickup_user_id:
+            raise HTTPException(status_code=400, detail="Choose the staff member who will take the company vehicle")
         order = SalesOrder(
             customer_id=customer.id,
             notes=data.notes,
@@ -257,6 +269,11 @@ class SalesOrderService:
             dispatch_by=data.dispatch_by,
             turnaround_days=data.turnaround_days,
             gst_billing=data.gst_billing,
+            transport_mode=mode,
+            driver_name=driver,
+            carrier_phone=phone,
+            vehicle_plate=plate,
+            pickup_user_id=data.pickup_user_id,
         )
         self.session.add(order)
         await self.session.flush()
@@ -265,7 +282,7 @@ class SalesOrderService:
             product = await inventory.lock_product(item.product_id)
             free = await inventory.available_product(product)
             held, shortfall = claim(free, item.quantity)
-            if shortfall > 0 and product.product_type == "both" and item.shortfall_choice not in {"make", "buy"}:
+            if shortfall > 0 and item.shortfall_choice not in {"make", "buy"}:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Choose make or buy for the shortfall of {product.product_name}",
@@ -276,7 +293,9 @@ class SalesOrderService:
                 quantity=qty(item.quantity),
                 held_quantity=held,
                 unit_price=product.sale_price_without_gst,
-                shortfall_choice=item.shortfall_choice,
+                shortfall_choice=item.shortfall_choice if shortfall > 0 else None,
+                custom_unit=(item.custom_unit or "").strip() or None,
+                gst=item.gst,
                 source_purchase_order_id=item.source_purchase_order_id,
             )
             self.session.add(line)
@@ -291,16 +310,13 @@ class SalesOrderService:
                 line.reservation_id = reservation.id
                 self.session.add(line)
             if shortfall > 0:
-                choice = item.shortfall_choice
-                make = product.product_type == "manufactured" or (
-                    product.product_type == "both" and choice == "make"
-                )
-                if make:
+                if item.shortfall_choice == "make":
+                    days = max(int(product.make_days or 0) + int(product.ship_days or 0), 1)
                     await ProductionService(self.session).create_job(
                         ProductionJobCreate(
                             product_id=product.id,
                             quantity=shortfall,
-                            estimated_minutes=60,
+                            estimated_minutes=days * 24 * 60,
                             notes=f"Shortfall for sales order {order.id}",
                             source="sales_shortfall",
                             source_id=order.id,
@@ -365,13 +381,16 @@ class SalesOrderService:
             return await self._read(order, show_prices)
         if current in {"delivered", "cancelled"}:
             raise HTTPException(status_code=409, detail="This order can no longer change status")
-        if target == "delivered" and current != "in_delivery":
-            raise HTTPException(status_code=409, detail="Mark the order in delivery before dispatching it")
+        if target == "delivered" and order.receipt_attachment_id is None:
+            raise HTTPException(status_code=409, detail="Upload the receipt before completing this order")
         if target == "cancelled":
             await self._release_holds(order)
-        elif target == "delivered":
+        if target == "delivered":
+            if order.receipt_attachment_id is None:
+                raise HTTPException(status_code=409, detail="Upload the receipt before completing this order")
             await self._apply_sources(order, sources or [])
             await self._consume_holds(order, actor)
+            await self._open_invoice(order)
             await self._notify_dispatched(order, actor)
         order.status = target
         self.session.add(order)
@@ -388,6 +407,48 @@ class SalesOrderService:
         )
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices)
+
+    async def record_receipt(self, order_id: UUID, attachment_id: UUID, actor: User, *, show_prices: bool) -> SalesOrderRead:
+        from app.api.routes.attachment.attachment_model import Attachment
+        from app.api.routes.sales.sales_model import SalesOrder
+
+        order = await get_or_404(self.session, SalesOrder, order_id)
+        if canonical_status(order.status) in {"delivered", "cancelled"}:
+            raise HTTPException(status_code=409, detail="This order can no longer change status")
+        if not order.transport_mode:
+            raise HTTPException(status_code=400, detail="Choose how this order will travel before the receipt")
+        stored = await self.session.get(Attachment, attachment_id)
+        if stored is None:
+            raise HTTPException(status_code=400, detail="That file was not uploaded")
+        order.receipt_attachment_id = stored.id
+        self.session.add(order)
+        await self.session.flush()
+        return await self.set_status(order_id, "delivered", actor, show_prices=show_prices)
+
+    async def _open_invoice(self, order) -> None:
+        from app.api.routes.customer.customer_model import Customer
+        from app.api.routes.invoice.invoice_model import Invoice
+        from app.api.routes.invoice.invoice_services import InvoiceService
+        from app.api.routes.product.product_model import Product
+        from app.api.routes.sales.sales_model import SalesOrderLine
+        from app.api.routes.settings.settings_model import CompanySettings
+
+        existing = await self.session.scalar(select(Invoice).where(Invoice.sales_order_id == order.id))
+        if existing is not None:
+            return
+        customer = await self.session.get(Customer, order.customer_id)
+        company = await self.session.scalar(select(CompanySettings))
+        if customer is None or company is None:
+            return
+        lines = list(
+            await self.session.scalars(select(SalesOrderLine).where(SalesOrderLine.sales_order_id == order.id))
+        )
+        products = {}
+        for line in lines:
+            product = await self.session.get(Product, line.product_id)
+            if product is not None:
+                products[product.id] = product
+        await InvoiceService(self.session).create_for_order(order, lines, customer, products, company)
 
     async def dispatch(self, order_id: UUID, actor: User, *, show_prices: bool) -> SalesOrderRead:
         return await self.set_status(order_id, "delivered", actor, show_prices=show_prices)
@@ -511,6 +572,8 @@ class SalesOrderService:
                     held_quantity=line.held_quantity,
                     unit_price=line.unit_price if show_prices else None,
                     shortfall_choice=line.shortfall_choice,
+                    custom_unit=line.custom_unit,
+                    gst=line.gst,
                     source_purchase_order_id=line.source_purchase_order_id,
                 )
             )
@@ -526,6 +589,12 @@ class SalesOrderService:
             dispatch_by=order.dispatch_by,
             turnaround_days=order.turnaround_days,
             gst_billing=order.gst_billing,
+            transport_mode=order.transport_mode,
+            driver_name=order.driver_name,
+            carrier_phone=order.carrier_phone,
+            vehicle_plate=order.vehicle_plate,
+            pickup_user_id=order.pickup_user_id,
+            receipt_attachment_id=order.receipt_attachment_id,
             lines=rendered,
             invoice_id=invoice.id if invoice else None,
             invoice_has_pdf=bool(invoice and invoice.pdf_attachment_id),

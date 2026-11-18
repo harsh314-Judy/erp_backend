@@ -1,7 +1,9 @@
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import func, select
 
@@ -10,7 +12,9 @@ from app.api.routes.raw_material.raw_material_model import RawMaterial, RawMater
 from app.api.routes.raw_material.raw_material_schemas import (
     RawMaterialCategoryCreate,
     RawMaterialCategoryRead,
+    RawMaterialCategoryUpdate,
     RawMaterialCreate,
+    ReplaceRequest,
     RawMaterialOption,
     RawMaterialRead,
     RawMaterialUpdate,
@@ -25,6 +29,7 @@ from app.db.repository import (
     get_or_404,
     list_models,
     to_page,
+    update_model,
 )
 
 _KINDS = {"sheet", "polish", "color", "other"}
@@ -47,19 +52,47 @@ class RawMaterialService:
         row = await create_model(self.session, RawMaterialCategory, data)
         return RawMaterialCategoryRead.model_validate(row)
 
+    async def update_category(
+        self, category_id: UUID, data: RawMaterialCategoryUpdate
+    ) -> RawMaterialCategoryRead:
+        row = await update_model(self.session, RawMaterialCategory, category_id, data)
+        return RawMaterialCategoryRead.model_validate(row)
+
     async def delete_category(self, category_id: UUID) -> None:
         await get_or_404(self.session, RawMaterialCategory, category_id)
-        used = await self.session.scalar(
-            select(func.count())
-            .select_from(RawMaterial)
-            .where(RawMaterial.category_id == category_id)
+        used = int(
+            await self.session.scalar(
+                select(func.count()).select_from(RawMaterial).where(RawMaterial.category_id == category_id)
+            )
+            or 0
         )
         if used:
             raise HTTPException(
                 status_code=409,
-                detail="Remove this category from raw materials before deleting it",
+                detail=f"{used} materials use this category. Move them to another category before removing it.",
             )
         await delete_model(self.session, RawMaterialCategory, category_id)
+
+    async def replace_category(self, category_id: UUID, data: ReplaceRequest) -> RawMaterialCategoryRead:
+        await get_or_404(self.session, RawMaterialCategory, category_id)
+        if data.replacement_id is not None:
+            if data.replacement_id == category_id:
+                raise HTTPException(status_code=400, detail="Pick a different category")
+            replacement = await get_or_404(self.session, RawMaterialCategory, data.replacement_id)
+        else:
+            replacement = RawMaterialCategory(
+                name=data.temporary_name.strip(),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            )
+            self.session.add(replacement)
+            await self.session.flush()
+        await self.session.execute(
+            update(RawMaterial).where(RawMaterial.category_id == category_id).values(category_id=replacement.id)
+        )
+        await self.session.delete(await get_or_404(self.session, RawMaterialCategory, category_id))
+        await commit_or_conflict(self.session)
+        await self.session.refresh(replacement)
+        return RawMaterialCategoryRead.model_validate(replacement)
 
     async def list_materials(
         self,

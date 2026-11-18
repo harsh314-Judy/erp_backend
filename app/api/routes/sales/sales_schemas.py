@@ -47,6 +47,8 @@ class SalesOrderLineWrite(BaseModel):
     product_id: UUID
     quantity: Decimal = Field(gt=0)
     shortfall_choice: str | None = None
+    custom_unit: str | None = Field(default=None, max_length=40)
+    gst: bool = True
     source_purchase_order_id: UUID | None = None
 
 
@@ -57,6 +59,11 @@ class SalesOrderCreate(BaseModel):
     dispatch_by: datetime | None = None
     turnaround_days: int | None = Field(default=None, ge=1)
     gst_billing: bool = True
+    transport_mode: str | None = None
+    driver_name: str | None = None
+    carrier_phone: str | None = None
+    vehicle_plate: str | None = None
+    pickup_user_id: UUID | None = None
     lines: list[SalesOrderLineWrite] = Field(min_length=1)
 
 
@@ -69,6 +76,8 @@ class SalesOrderLineRead(BaseModel):
     held_quantity: Decimal
     unit_price: Decimal | None = None
     shortfall_choice: str | None = None
+    custom_unit: str | None = None
+    gst: bool = True
     source_purchase_order_id: UUID | None = None
 
 
@@ -84,6 +93,12 @@ class SalesOrderRead(BaseModel):
     dispatch_by: datetime | None = None
     turnaround_days: int | None = None
     gst_billing: bool = True
+    transport_mode: str | None = None
+    driver_name: str | None = None
+    carrier_phone: str | None = None
+    vehicle_plate: str | None = None
+    pickup_user_id: UUID | None = None
+    receipt_attachment_id: UUID | None = None
     lines: list[SalesOrderLineRead]
     invoice_id: UUID | None = None
     invoice_has_pdf: bool = False
@@ -104,6 +119,10 @@ class SalesSource(BaseModel):
 class SalesOrderStatusUpdate(BaseModel):
     status: str
     sources: list[SalesSource] = Field(default_factory=list)
+
+
+class SalesReceipt(BaseModel):
+    attachment_id: UUID
 
 
 class PackagingAssign(BaseModel):

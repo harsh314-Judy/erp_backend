@@ -7,7 +7,9 @@ from app.api.dependencies import CurrentUserDep, RawMaterialServiceDep
 from app.api.routes.raw_material.raw_material_schemas import (
     RawMaterialCategoryCreate,
     RawMaterialCategoryRead,
+    RawMaterialCategoryUpdate,
     RawMaterialCreate,
+    ReplaceRequest,
     RawMaterialOption,
     RawMaterialRead,
     RawMaterialUpdate,
@@ -37,9 +39,23 @@ async def create_category(
     return await service.create_category(data)
 
 
+@router.patch("/categories/{category_id}", response_model=RawMaterialCategoryRead)
+async def update_category(
+    category_id: UUID, data: RawMaterialCategoryUpdate, service: RawMaterialServiceDep
+) -> RawMaterialCategoryRead:
+    return await service.update_category(category_id, data)
+
+
 @router.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_category(category_id: UUID, service: RawMaterialServiceDep) -> None:
     await service.delete_category(category_id)
+
+
+@router.post("/categories/{category_id}/replace", response_model=RawMaterialCategoryRead)
+async def replace_category(
+    category_id: UUID, data: ReplaceRequest, service: RawMaterialServiceDep
+) -> RawMaterialCategoryRead:
+    return await service.replace_category(category_id, data)
 
 
 async def _role(session: PGSessionDep, user: CurrentUserDep, capability: str) -> str:

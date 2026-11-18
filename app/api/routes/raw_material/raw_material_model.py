@@ -1,7 +1,8 @@
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Numeric, Text
+from sqlalchemy import DateTime, Numeric, Text
 from sqlmodel import Field
 
 from app.db.base import Entity
@@ -11,6 +12,7 @@ class RawMaterialCategory(Entity, table=True):
     __tablename__ = "raw_material_categories"
 
     name: str = Field(max_length=150, unique=True, nullable=False, index=True)
+    expires_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True), nullable=True)
 
 
 class RawMaterial(Entity, table=True):

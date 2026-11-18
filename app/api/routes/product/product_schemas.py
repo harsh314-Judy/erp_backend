@@ -1,15 +1,37 @@
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def _blank(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 class MeasurementUnitCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+    abbreviation: str | None = Field(default=None, max_length=16)
+    detail: str | None = Field(default=None, max_length=80)
+
+    @field_validator("abbreviation", "detail", mode="before")
+    @classmethod
+    def empty_is_missing(cls, value: object) -> str | None:
+        return _blank(value)
 
 
 class MeasurementUnitUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
+    abbreviation: str | None = Field(default=None, max_length=16)
+    detail: str | None = Field(default=None, max_length=80)
+
+    @field_validator("abbreviation", "detail", mode="before")
+    @classmethod
+    def empty_is_missing(cls, value: object) -> str | None:
+        return _blank(value)
 
 
 class MeasurementUnitRead(BaseModel):
@@ -17,6 +39,23 @@ class MeasurementUnitRead(BaseModel):
 
     id: UUID
     name: str
+    abbreviation: str | None = None
+    detail: str | None = None
+    expires_at: datetime | None = None
+
+
+class ReplaceRequest(BaseModel):
+    replacement_id: UUID | None = None
+    temporary_name: str | None = Field(default=None, min_length=1, max_length=150)
+    detail: str | None = Field(default=None, max_length=80)
+
+    @model_validator(mode="after")
+    def one_choice(self):
+        has_existing = self.replacement_id is not None
+        has_temporary = bool(self.temporary_name and self.temporary_name.strip())
+        if has_existing == has_temporary:
+            raise ValueError("Choose an existing item or a temporary name")
+        return self
 
 
 class ProductCategoryCreate(BaseModel):
@@ -32,6 +71,7 @@ class ProductCategoryRead(BaseModel):
 
     id: UUID
     name: str
+    expires_at: datetime | None = None
 
 
 class ComponentWrite(BaseModel):
@@ -82,6 +122,11 @@ class ProductCreate(BaseModel):
     category_id: UUID
     alert_quantity: Decimal = Field(default=Decimal("0"), ge=0)
     quantity_per_bundle: int = Field(default=1, ge=1)
+    weight_per_piece: Decimal | None = Field(default=None, ge=0)
+    make_days: int = Field(default=7, ge=0)
+    buy_days: int = Field(default=7, ge=0)
+    ship_days: int = Field(default=2, ge=0)
+    buffer_days: int = Field(default=2, ge=0)
     product_type: str = "manufactured"
     hsn_code: str = ""
     responsible_user_id: UUID | None = None
@@ -99,6 +144,11 @@ class ProductUpdate(BaseModel):
     category_id: UUID | None = None
     alert_quantity: Decimal | None = Field(default=None, ge=0)
     quantity_per_bundle: int | None = Field(default=None, ge=1)
+    weight_per_piece: Decimal | None = Field(default=None, ge=0)
+    make_days: int | None = Field(default=None, ge=0)
+    buy_days: int | None = Field(default=None, ge=0)
+    ship_days: int | None = Field(default=None, ge=0)
+    buffer_days: int | None = Field(default=None, ge=0)
     product_type: str | None = None
     hsn_code: str | None = None
     responsible_user_id: UUID | None = None
@@ -119,6 +169,11 @@ class ProductRead(BaseModel):
     category_id: UUID
     alert_quantity: Decimal
     quantity_per_bundle: int
+    weight_per_piece: Decimal | None = None
+    make_days: int = 7
+    buy_days: int = 7
+    ship_days: int = 2
+    buffer_days: int = 2
     product_type: str = "manufactured"
     hsn_code: str = ""
     responsible_user_id: UUID | None = None

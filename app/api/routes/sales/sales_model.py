@@ -66,6 +66,14 @@ class SalesOrder(Entity, table=True):
     dispatch_by: datetime | None = Field(default=None, sa_type=DateTime(timezone=True), nullable=True)
     turnaround_days: int | None = Field(default=None, nullable=True)
     gst_billing: bool = Field(default=True, nullable=False)
+    transport_mode: str | None = Field(default=None, max_length=16, nullable=True)
+    driver_name: str | None = Field(default=None, max_length=120, nullable=True)
+    carrier_phone: str | None = Field(default=None, max_length=32, nullable=True)
+    vehicle_plate: str | None = Field(default=None, max_length=20, nullable=True)
+    pickup_user_id: UUID | None = Field(
+        default=None, foreign_key="users.id", nullable=True, ondelete="SET NULL"
+    )
+    receipt_attachment_id: UUID | None = Field(default=None, nullable=True)
 
 
 class SalesOrderLine(Entity, table=True):
@@ -81,6 +89,8 @@ class SalesOrderLine(Entity, table=True):
     held_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
     unit_price: Decimal = Field(sa_type=Numeric(12, 2), nullable=False)
     shortfall_choice: str | None = Field(default=None, max_length=16, nullable=True)
+    custom_unit: str | None = Field(default=None, max_length=40, nullable=True)
+    gst: bool = Field(default=True, nullable=False)
     reservation_id: UUID | None = Field(default=None, nullable=True)
     source_purchase_order_id: UUID | None = Field(
         default=None,
