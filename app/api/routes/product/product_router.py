@@ -16,6 +16,7 @@ from app.api.routes.product.product_schemas import (
     ProductOption,
     ProductRead,
     ProductUpdate,
+    ReplaceRequest,
     RouteStepRead,
     RouteWrite,
 )
@@ -81,6 +82,13 @@ async def delete_unit(unit_id: UUID, service: ProductServiceDep) -> None:
     await service.delete_unit(unit_id)
 
 
+@router.post("/measurement-units/{unit_id}/replace", response_model=MeasurementUnitRead)
+async def replace_unit(
+    unit_id: UUID, data: ReplaceRequest, service: ProductServiceDep
+) -> MeasurementUnitRead:
+    return await service.replace_unit(unit_id, data)
+
+
 @router.get("/product-categories", response_model=PaginatedResponse[ProductCategoryRead])
 async def list_categories(
     service: ProductServiceDep, pagination: PaginationDep
@@ -109,6 +117,13 @@ async def update_category(
 @router.delete("/product-categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_category(category_id: UUID, service: ProductServiceDep) -> None:
     await service.delete_category(category_id)
+
+
+@router.post("/product-categories/{category_id}/replace", response_model=ProductCategoryRead)
+async def replace_category(
+    category_id: UUID, data: ReplaceRequest, service: ProductServiceDep
+) -> ProductCategoryRead:
+    return await service.replace_category(category_id, data)
 
 
 @router.get("/products/options", response_model=list[ProductOption])

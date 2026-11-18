@@ -7,7 +7,7 @@ from sqlmodel import select
 from app.api.routes.user.user_model import User
 from app.db.repository import commit_or_conflict
 
-ORDER_STATUSES = {"initiated", "process", "in_delivery", "delivered", "cancelled"}
+ORDER_STATUSES = {"initiated", "process", "in_delivery", "delivered", "received", "accounted", "cancelled"}
 SLIP_KINDS = {"dispatch_slip", "received_slip", "cargo_photo", "vehicle_plate", "supplier_invoice"}
 
 from app.api.routes.purchase_order.purchase_order_model import (
@@ -136,34 +136,47 @@ class PurchaseFlowService:
         from app.api.routes.supplier.supplier_model import Supplier
 
         supplier = await get_or_404(self.session, Supplier, data["supplier_id"])
-        status = str(data.get("status") or "initiated").strip().lower()
-        if status not in ORDER_STATUSES:
-            raise HTTPException(
-                status_code=400,
-                detail="Status must be initiated, process, in delivery, or delivered",
-            )
         lines = data.get("lines") or []
         if not lines:
             raise HTTPException(status_code=400, detail="Add at least one item")
+        mode = str(data.get("transport_mode") or "").strip().lower()
+        if mode not in {"truck", "handcart", "staff_vehicle"}:
+            raise HTTPException(status_code=400, detail="Choose truck, hand cart, or staff pickup")
         plate = data.get("expected_vehicle_plate")
         if isinstance(plate, str):
             plate = plate.strip().upper() or None
-        orders = []
+        driver = (data.get("driver_name") or "").strip() or None
+        phone = (data.get("carrier_phone") or "").strip() or None
+        pickup = data.get("pickup_user_id") or None
+        if mode == "truck" and (not plate or not driver):
+            raise HTTPException(status_code=400, detail="A truck needs the licence plate and the driver's name")
+        if mode == "handcart" and (not driver or not phone):
+            raise HTTPException(status_code=400, detail="A hand cart needs the person's name and phone")
+        if mode == "staff_vehicle" and not pickup:
+            raise HTTPException(status_code=400, detail="Choose the staff member who will pick this up")
+        attachments = data.get("attachments") or []
+        if not any(str(item.get("kind") or "") in {"supplier_invoice", "received_slip"} for item in attachments):
+            raise HTTPException(status_code=400, detail="Upload the receipt photo")
+        order = PurchaseOrder(
+            supplier_id=supplier.id,
+            notes=data.get("notes"),
+            challan_number=(data.get("challan_number") or None),
+            challan_note=data.get("challan_note"),
+            expected_vehicle_plate=plate,
+            created_by_user_id=actor.id,
+            status="received",
+            stock_received=False,
+            transport_mode=mode,
+            driver_name=driver,
+            carrier_phone=phone,
+            pickup_user_id=pickup,
+        )
+        self.session.add(order)
+        await self.session.flush()
         for line in lines:
-            order = PurchaseOrder(
-                supplier_id=supplier.id,
-                notes=data.get("notes"),
-                challan_number=(data.get("challan_number") or None),
-                challan_note=data.get("challan_note"),
-                expected_vehicle_plate=plate,
-                created_by_user_id=actor.id,
-                status=status,
-            )
-            self.session.add(order)
-            await self.session.flush()
             await self._add_line(order, supplier, line)
-            await self._link_files(order, data.get("attachments") or [])
-            orders.append(order)
+        await self._link_files(order, attachments)
+        orders = [order]
         request_ids = data.get("request_ids") or []
         if request_ids and orders:
             from app.api.routes.purchase_order.purchase_order_model import PurchaseRequest
@@ -176,16 +189,6 @@ class PurchaseFlowService:
                 request.purchase_order_id = orders[0].id
                 self.session.add(request)
         await self.session.flush()
-        for order in orders:
-            if order.status == "delivered":
-                await self._require_receipt_proof(order)
-                await self._apply_receipt(order, actor)
-                order.stock_received = True
-                self.session.add(order)
-                await self._note_received(order, actor)
-                await self._notify_purchase(order, actor, arriving=False)
-            if order.status == "in_delivery":
-                await self._notify_purchase(order, actor, arriving=True)
         await commit_or_conflict(self.session)
         return {"orders": await self._read_many(orders, show_prices=True, staff_view=False)}
 
@@ -223,22 +226,55 @@ class PurchaseFlowService:
                     detail="Status must be initiated, process, in delivery, delivered, or cancelled",
                 )
             if order.status == "cancelled" and status != "cancelled":
-                raise HTTPException(status_code=409, detail="This order is cancelled")
-            if status == "cancelled" and order.stock_received:
-                raise HTTPException(status_code=409, detail="Stock was already added for this order")
+                raise HTTPException(status_code=409, detail="Restore the order before changing it")
+            if status == "cancelled":
+                reason = str(changes.get("cancel_reason") or "").strip()
+                if not reason:
+                    raise HTTPException(status_code=400, detail="A reason is required to cancel this order")
+                if order.stock_received:
+                    raise HTTPException(status_code=409, detail="Stock was already added for this order")
+                if order.status != "cancelled":
+                    order.status_before_cancel = order.status
+                order.cancel_reason = reason
             if order.stock_received and status != order.status:
                 raise HTTPException(status_code=409, detail="Stock was already added for this order")
             if status == "delivered" and not order.stock_received:
                 await self._require_receipt_proof(order)
-                await self._apply_receipt(order, actor)
-                order.stock_received = True
-                order.receipt_fail_reason = None
-                order.receipt_fail_note = None
                 await self._note_received(order, actor)
-                await self._notify_purchase(order, actor, arriving=False)
             if status == "in_delivery" and order.status != "in_delivery":
                 await self._notify_purchase(order, actor, arriving=True)
             order.status = status
+        self.session.add(order)
+        await commit_or_conflict(self.session)
+        return await self._read(order, show_prices=True, staff_view=False)
+
+    async def account_materials(self, order_id: UUID, actor: User) -> dict:
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrder
+
+        order = await get_or_404(self.session, PurchaseOrder, order_id)
+        if order.status == "cancelled":
+            raise HTTPException(status_code=409, detail="This order is cancelled")
+        if order.stock_received:
+            return await self._read(order, show_prices=True, staff_view=False)
+        await self._require_receipt_proof(order)
+        await self._apply_receipt(order, actor)
+        order.stock_received = True
+        order.status = "accounted"
+        self.session.add(order)
+        await self._note_received(order, actor)
+        await commit_or_conflict(self.session)
+        return await self._read(order, show_prices=True, staff_view=False)
+
+    async def restore_order(self, order_id: UUID, actor: User) -> dict:
+        del actor
+        from app.api.routes.purchase_order.purchase_order_model import PurchaseOrder
+
+        order = await get_or_404(self.session, PurchaseOrder, order_id)
+        if order.status != "cancelled":
+            raise HTTPException(status_code=409, detail="This order is not cancelled")
+        order.status = order.status_before_cancel or "received"
+        order.cancel_reason = None
+        order.status_before_cancel = None
         self.session.add(order)
         await commit_or_conflict(self.session)
         return await self._read(order, show_prices=True, staff_view=False)
@@ -264,8 +300,6 @@ class PurchaseFlowService:
         if result != "pass":
             raise HTTPException(status_code=400, detail="Pass or fail the delivery")
         await self._require_receipt_proof(order)
-        await self._apply_receipt(order, actor)
-        order.stock_received = True
         order.status = "delivered"
         order.receipt_fail_reason = None
         order.receipt_fail_note = None
@@ -304,8 +338,6 @@ class PurchaseFlowService:
                 detail="The vehicle plate does not match. Add a note before verifying.",
             )
         order.plate_mismatch_note = mismatch_note
-        await self._apply_receipt(order, actor)
-        order.stock_received = True
         order.status = "verified"
         self.session.add(order)
         await self._note_received(order, actor)
@@ -344,8 +376,8 @@ class PurchaseFlowService:
         if data.attachment_id is None:
             raise HTTPException(status_code=400, detail="A photo of the payment is required")
         order = await get_or_404(self.session, PurchaseOrder, order_id)
-        if not order.stock_received:
-            raise HTTPException(status_code=409, detail="Receive the goods before recording a payment")
+        if order.status == "cancelled":
+            raise HTTPException(status_code=409, detail="This order is cancelled")
         stored = await self.session.get(Attachment, data.attachment_id)
         if stored is None:
             raise HTTPException(status_code=400, detail="Payment photo was not found")
@@ -369,6 +401,12 @@ class PurchaseFlowService:
             )
         )
         order.amount_paid = (order.amount_paid + amount).quantize(Decimal("0.01"))
+        if not order.stock_received:
+            await self._require_receipt_proof(order)
+            await self._apply_receipt(order, actor)
+            order.stock_received = True
+            order.status = "accounted"
+            await self._note_received(order, actor)
         self.session.add(order)
         await record_activity(
             self.session,
@@ -435,12 +473,8 @@ class PurchaseFlowService:
             )
         )
         kinds = {row.kind for row in rows}
-        invoice = "supplier_invoice" in kinds or "received_slip" in kinds
-        if "vehicle_plate" not in kinds or "cargo_photo" not in kinds or not invoice:
-            raise HTTPException(
-                status_code=400,
-                detail="Upload the licence plate, the unloaded shipment, and the supplier invoice before stocking",
-            )
+        if "supplier_invoice" not in kinds and "received_slip" not in kinds:
+            raise HTTPException(status_code=400, detail="Upload the receipt photo before stocking")
 
     async def _notify_purchase(self, order, actor, *, arriving: bool) -> None:
         from app.api.routes.notification.notification_services import notify, user_ids_with
@@ -460,6 +494,31 @@ class PurchaseFlowService:
             email=False,
         )
 
+    async def _remember_rates(self, product_id, material_id, unit_price, selling, gst: bool, gst_percent: int, unit_id) -> None:
+        from app.api.routes.product.product_model import Product
+        from app.api.routes.raw_material.raw_material_model import RawMaterial
+
+        if product_id is not None:
+            product = await self.session.get(Product, product_id)
+            if product is not None:
+                product.last_purchase_price = unit_price
+                product.gst = gst
+                product.gst_percent = gst_percent
+                if selling is not None:
+                    product.sale_price_without_gst = selling
+                if unit_id:
+                    product.measurement_unit_id = unit_id
+                self.session.add(product)
+        if material_id is not None:
+            material = await self.session.get(RawMaterial, material_id)
+            if material is not None:
+                material.purchase_price = unit_price
+                if selling is not None:
+                    material.price = selling
+                if unit_id:
+                    material.measurement_unit_id = unit_id
+                self.session.add(material)
+
     async def _add_line(self, order, supplier, line) -> None:
         from decimal import Decimal
 
@@ -477,15 +536,30 @@ class PurchaseFlowService:
             if supplier.supply_kind == "materials":
                 raise HTTPException(status_code=400, detail="This supplier only supplies raw materials")
             await self._require_product_link(supplier.id, product_id)
+        purchase_rate = Decimal(str(line.get("purchase_rate") if line.get("purchase_rate") is not None else line.get("unit_price") or 0))
+        gst = bool(line.get("gst"))
+        gst_percent = int(line.get("gst_percent") or 0)
+        unit_price = purchase_rate
+        if gst and gst_percent:
+            unit_price = (purchase_rate * (Decimal(100) + Decimal(gst_percent)) / Decimal(100)).quantize(Decimal("0.01"))
+        selling_rate = line.get("selling_rate")
+        selling = Decimal(str(selling_rate)) if selling_rate is not None and selling_rate != "" else None
+        unit_id = line.get("measurement_unit_id") or None
         self.session.add(
             PurchaseOrderLine(
                 purchase_order_id=order.id,
                 product_id=product_id,
                 raw_material_id=material_id,
                 quantity=Decimal(str(line["quantity"])),
-                unit_price=Decimal(str(line["unit_price"])),
+                unit_price=unit_price,
+                purchase_rate=purchase_rate,
+                selling_rate=selling,
+                gst=gst,
+                gst_percent=gst_percent if gst else 0,
+                measurement_unit_id=unit_id,
             )
         )
+        await self._remember_rates(product_id, material_id, unit_price, selling, gst, gst_percent if gst else 0, unit_id)
 
     async def _replace_lines(self, order, lines: list) -> None:
         from app.api.routes.purchase_order.purchase_order_model import PurchaseOrderLine
@@ -505,12 +579,7 @@ class PurchaseFlowService:
         for line in lines:
             payload = line if isinstance(line, dict) else line
             if not isinstance(payload, dict):
-                payload = {
-                    "product_id": line.product_id,
-                    "raw_material_id": line.raw_material_id,
-                    "quantity": line.quantity,
-                    "unit_price": line.unit_price,
-                }
+                payload = payload.model_dump()
             await self._add_line(order, supplier, payload)
 
     async def _require_product_link(self, supplier_id: UUID, product_id: UUID) -> None:
@@ -567,7 +636,6 @@ class PurchaseFlowService:
                 material = await self.session.get(RawMaterial, line.raw_material_id)
                 if material is not None:
                     material.purchase_price = line.unit_price
-                    material.price = line.unit_price
                     self.session.add(material)
             if line.product_id is not None:
                 product = await self.session.get(Product, line.product_id)
@@ -664,6 +732,11 @@ class PurchaseFlowService:
                     "item_name": item_name,
                     "quantity": line.quantity,
                     "unit_price": line.unit_price if show_prices and not staff_view else None,
+                    "purchase_rate": line.purchase_rate if show_prices and not staff_view else None,
+                    "selling_rate": line.selling_rate if show_prices and not staff_view else None,
+                    "gst": line.gst,
+                    "gst_percent": line.gst_percent,
+                    "measurement_unit_id": line.measurement_unit_id,
                 }
             )
         presented = []
@@ -683,6 +756,12 @@ class PurchaseFlowService:
                     "receipt_fail_note": order.receipt_fail_note,
                     "expected_vehicle_plate": order.expected_vehicle_plate,
                     "arrived_vehicle_plate": order.arrived_vehicle_plate,
+                    "transport_mode": order.transport_mode,
+                    "driver_name": order.driver_name,
+                    "carrier_phone": order.carrier_phone,
+                    "pickup_user_id": order.pickup_user_id,
+                    "cancel_reason": order.cancel_reason,
+                    "status_before_cancel": order.status_before_cancel,
                     "plate_mismatch_note": order.plate_mismatch_note,
                     "receipt_attachment_id": order.receipt_attachment_id,
                     "attachments": files.get(order.id, []),

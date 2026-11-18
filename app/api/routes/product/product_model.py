@@ -1,7 +1,8 @@
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Numeric, Text
+from sqlalchemy import DateTime, Numeric, Text
 from sqlmodel import Field
 
 from app.db.base import Entity
@@ -11,12 +12,16 @@ class MeasurementUnit(Entity, table=True):
     __tablename__ = "measurement_units"
 
     name: str = Field(max_length=100, unique=True, nullable=False, index=True)
+    abbreviation: str | None = Field(default=None, max_length=16, nullable=True)
+    detail: str | None = Field(default=None, sa_type=Text, nullable=True)
+    expires_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True), nullable=True)
 
 
 class ProductCategory(Entity, table=True):
     __tablename__ = "product_categories"
 
     name: str = Field(max_length=150, unique=True, nullable=False, index=True)
+    expires_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True), nullable=True)
 
 
 class Product(Entity, table=True):
@@ -57,6 +62,11 @@ class Product(Entity, table=True):
     )
     alert_quantity: Decimal = Field(default=Decimal("0"), sa_type=Numeric(14, 3), nullable=False)
     quantity_per_bundle: int = Field(default=1, nullable=False)
+    weight_per_piece: Decimal | None = Field(default=None, sa_type=Numeric(14, 3), nullable=True)
+    make_days: int = Field(default=7, nullable=False)
+    buy_days: int = Field(default=7, nullable=False)
+    ship_days: int = Field(default=2, nullable=False)
+    buffer_days: int = Field(default=2, nullable=False)
 
 
 class ProductRouteStep(Entity, table=True):

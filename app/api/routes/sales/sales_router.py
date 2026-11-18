@@ -19,6 +19,7 @@ from app.api.routes.sales.sales_schemas import (
     SalesOrderCreate,
     SalesOrderRead,
     SalesOrderStatusUpdate,
+    SalesReceipt,
 )
 from app.api.routes.user.user_model import Role
 from app.api.security.permissions import MANAGE_SALES, can_see_prices, forbid, role_has
@@ -101,6 +102,18 @@ async def update_order_status(
 ) -> SalesOrderRead:
     name = await _sales_role(session, user)
     return await service.set_status(order_id, data.status, user, show_prices=can_see_prices(name), sources=data.sources)
+
+
+@router.post("/orders/{order_id}/receipt", response_model=SalesOrderRead)
+async def record_sales_receipt(
+    order_id: UUID,
+    data: SalesReceipt,
+    service: SalesOrderServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> SalesOrderRead:
+    name = await _sales_role(session, user)
+    return await service.record_receipt(order_id, data.attachment_id, user, show_prices=can_see_prices(name))
 
 
 @router.post("/orders/{order_id}/dispatch", response_model=SalesOrderRead)

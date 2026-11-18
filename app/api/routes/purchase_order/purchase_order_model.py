@@ -70,6 +70,14 @@ class PurchaseOrder(Entity, table=True):
     challan_number: str | None = Field(default=None, max_length=80, nullable=True)
     challan_note: str | None = Field(default=None, sa_type=Text, nullable=True)
     amount_paid: Decimal = Field(default=Decimal("0"), sa_type=Numeric(12, 2), nullable=False)
+    transport_mode: str | None = Field(default=None, max_length=16, nullable=True)
+    driver_name: str | None = Field(default=None, max_length=120, nullable=True)
+    carrier_phone: str | None = Field(default=None, max_length=32, nullable=True)
+    pickup_user_id: UUID | None = Field(
+        default=None, foreign_key="users.id", nullable=True, ondelete="SET NULL"
+    )
+    cancel_reason: str | None = Field(default=None, sa_type=Text, nullable=True)
+    status_before_cancel: str | None = Field(default=None, max_length=32, nullable=True)
 
 
 class PurchaseOrderLine(Entity, table=True):
@@ -90,6 +98,16 @@ class PurchaseOrderLine(Entity, table=True):
     )
     quantity: Decimal = Field(sa_type=Numeric(14, 3), nullable=False)
     unit_price: Decimal = Field(sa_type=Numeric(12, 2), nullable=False)
+    purchase_rate: Decimal | None = Field(default=None, sa_type=Numeric(12, 2), nullable=True)
+    selling_rate: Decimal | None = Field(default=None, sa_type=Numeric(12, 2), nullable=True)
+    gst: bool = Field(default=False, nullable=False)
+    gst_percent: int = Field(default=0, nullable=False)
+    measurement_unit_id: UUID | None = Field(
+        default=None,
+        foreign_key="measurement_units.id",
+        nullable=True,
+        ondelete="RESTRICT",
+    )
 
 
 class PurchasePayment(Entity, table=True):

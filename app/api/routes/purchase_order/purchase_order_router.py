@@ -213,6 +213,32 @@ async def update_purchase_order(
     return await service.update_order(order_id, data, user)
 
 
+@router.post("/purchase-orders/{order_id}/account")
+async def account_purchase_materials(
+    order_id: UUID,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.account_materials(order_id, user)
+
+
+@router.post("/purchase-orders/{order_id}/restore")
+async def restore_purchase_order(
+    order_id: UUID,
+    service: PurchaseFlowServiceDep,
+    session: PGSessionDep,
+    user: CurrentUserDep,
+) -> dict:
+    name = await _purchase_role(session, user)
+    if not role_has(name, MANAGE_PURCHASING):
+        forbid()
+    return await service.restore_order(order_id, user)
+
+
 @router.post("/purchase-orders/{order_id}/payments")
 async def add_purchase_payment(
     order_id: UUID,

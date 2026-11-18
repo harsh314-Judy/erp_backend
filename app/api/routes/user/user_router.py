@@ -5,7 +5,7 @@ from fastapi import APIRouter, Response, status
 from app.api.db_dependency import PGSessionDep
 from app.api.dependencies import AdminUserDep, CurrentUserDep, UserServiceDep
 from app.api.routes.user.user_model import Role, User
-from app.api.security.permissions import EDIT_INVENTORY, MANAGE_SALES, forbid, role_has
+from app.api.security.permissions import EDIT_INVENTORY, MANAGE_PURCHASING, MANAGE_SALES, forbid, role_has
 from sqlmodel import select
 from app.api.routes.user.user_schemas import (
     PasswordChangeRequest,
@@ -92,7 +92,7 @@ async def list_users(
 async def user_options(session: PGSessionDep, user: CurrentUserDep) -> list[dict]:
     role = await session.get(Role, user.role_id)
     name = role.role_name if role else ""
-    if not (role_has(name, MANAGE_SALES) or role_has(name, EDIT_INVENTORY)):
+    if not (role_has(name, MANAGE_SALES) or role_has(name, EDIT_INVENTORY) or role_has(name, MANAGE_PURCHASING)):
         forbid()
     rows = await session.scalars(select(User).order_by(User.first_name))
     return [

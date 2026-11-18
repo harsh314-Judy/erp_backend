@@ -1,7 +1,10 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 
 from fastapi import HTTPException
+from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import func, or_, select
 
@@ -23,6 +26,7 @@ from app.api.routes.product.product_schemas import (
     ProductCategoryRead,
     ProductCategoryUpdate,
     ProductCreate,
+    ReplaceRequest,
     ProductOption,
     ProductRead,
     ProductUpdate,
@@ -33,6 +37,7 @@ from app.api.routes.product.product_schemas import (
 from app.api.routes.raw_material.raw_material_model import RawMaterial
 from app.api.schemas.pagination import PaginatedResponse, PaginationParams
 from app.db.repository import (
+    commit_or_conflict,
     create_model,
     delete_model,
     get_or_404,
@@ -42,13 +47,69 @@ from app.db.repository import (
 )
 
 
+DEFAULT_UNITS = (
+    "kg",
+    "gram",
+    "tonne",
+    "piece",
+    "bundle (12 pcs)",
+    "liter",
+    "meter",
+    "foot",
+    "sheet",
+    "coil",
+)
+UNIT_ABBREVIATIONS = {
+    "kg": "kg",
+    "kilogram": "kg",
+    "gram": "g",
+    "tonne": "t",
+    "piece": "pc",
+    "bundle (12 pcs)": "bdl",
+    "liter": "L",
+    "liters": "L",
+    "litre": "L",
+    "litres": "L",
+    "meter": "m",
+    "metre": "m",
+    "foot": "ft",
+    "feet": "ft",
+    "sheet": "sht",
+    "coil": "coil",
+    "pipe": "pipe",
+}
+
+
 class ProductService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+    async def ensure_default_units(self) -> None:
+        rows = list(await self.session.scalars(select(MeasurementUnit)))
+        found = {row.name for row in rows}
+        changed = False
+        for name in DEFAULT_UNITS:
+            if name not in found:
+                self.session.add(MeasurementUnit(name=name, abbreviation=UNIT_ABBREVIATIONS.get(name)))
+                changed = True
+        for row in rows:
+            if row.abbreviation:
+                continue
+            abbreviation = UNIT_ABBREVIATIONS.get(row.name.strip().lower())
+            if abbreviation:
+                row.abbreviation = abbreviation
+                changed = True
+        if not changed:
+            return
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            await self.session.rollback()
+
     async def list_units(
         self, pagination: PaginationParams
     ) -> PaginatedResponse[MeasurementUnitRead]:
+        await self.ensure_default_units()
         rows, total = await list_models(self.session, MeasurementUnit, pagination)
         return to_page(
             [MeasurementUnitRead.model_validate(row) for row in rows], total, pagination
@@ -64,8 +125,55 @@ class ProductService:
         row = await update_model(self.session, MeasurementUnit, unit_id, data)
         return MeasurementUnitRead.model_validate(row)
 
+    async def unit_usage(self, unit_id: UUID) -> int:
+        products = int(
+            await self.session.scalar(
+                select(func.count()).select_from(Product).where(Product.measurement_unit_id == unit_id)
+            )
+            or 0
+        )
+        materials = int(
+            await self.session.scalar(
+                select(func.count()).select_from(RawMaterial).where(RawMaterial.measurement_unit_id == unit_id)
+            )
+            or 0
+        )
+        return products + materials
+
     async def delete_unit(self, unit_id: UUID) -> None:
+        await get_or_404(self.session, MeasurementUnit, unit_id)
+        used = await self.unit_usage(unit_id)
+        if used:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{used} goods use this unit. Move them to another unit before removing it.",
+            )
         await delete_model(self.session, MeasurementUnit, unit_id)
+
+    async def replace_unit(self, unit_id: UUID, data: ReplaceRequest) -> MeasurementUnitRead:
+        await get_or_404(self.session, MeasurementUnit, unit_id)
+        if data.replacement_id is not None:
+            if data.replacement_id == unit_id:
+                raise HTTPException(status_code=400, detail="Pick a different unit")
+            replacement = await get_or_404(self.session, MeasurementUnit, data.replacement_id)
+        else:
+            replacement = MeasurementUnit(
+                name=data.temporary_name.strip(),
+                detail=(data.detail or "").strip() or None,
+                expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            )
+            self.session.add(replacement)
+            await self.session.flush()
+        await self.session.execute(
+            update(Product).where(Product.measurement_unit_id == unit_id).values(measurement_unit_id=replacement.id)
+        )
+        await self.session.execute(
+            update(RawMaterial).where(RawMaterial.measurement_unit_id == unit_id).values(measurement_unit_id=replacement.id)
+        )
+        await self.session.delete(await get_or_404(self.session, MeasurementUnit, unit_id))
+        await commit_or_conflict(self.session)
+        await self.session.refresh(replacement)
+        return MeasurementUnitRead.model_validate(replacement)
 
     async def list_categories(
         self, pagination: PaginationParams
@@ -87,15 +195,39 @@ class ProductService:
 
     async def delete_category(self, category_id: UUID) -> None:
         await get_or_404(self.session, ProductCategory, category_id)
-        used = await self.session.scalar(
-            select(func.count()).select_from(Product).where(Product.category_id == category_id)
+        used = int(
+            await self.session.scalar(
+                select(func.count()).select_from(Product).where(Product.category_id == category_id)
+            )
+            or 0
         )
         if used:
             raise HTTPException(
                 status_code=409,
-                detail="Remove this category from products before deleting it",
+                detail=f"{used} goods use this category. Move them to another category before removing it.",
             )
         await delete_model(self.session, ProductCategory, category_id)
+
+    async def replace_category(self, category_id: UUID, data: ReplaceRequest) -> ProductCategoryRead:
+        await get_or_404(self.session, ProductCategory, category_id)
+        if data.replacement_id is not None:
+            if data.replacement_id == category_id:
+                raise HTTPException(status_code=400, detail="Pick a different category")
+            replacement = await get_or_404(self.session, ProductCategory, data.replacement_id)
+        else:
+            replacement = ProductCategory(
+                name=data.temporary_name.strip(),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+            )
+            self.session.add(replacement)
+            await self.session.flush()
+        await self.session.execute(
+            update(Product).where(Product.category_id == category_id).values(category_id=replacement.id)
+        )
+        await self.session.delete(await get_or_404(self.session, ProductCategory, category_id))
+        await commit_or_conflict(self.session)
+        await self.session.refresh(replacement)
+        return ProductCategoryRead.model_validate(replacement)
 
     async def list_products(
         self, pagination: PaginationParams, *, query: str | None, show_prices: bool, brief: bool = False
